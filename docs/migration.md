@@ -12,6 +12,11 @@ The first core boundary provides validated format/packet-duration types, f32
 worker blocks, opaque source/stream keys, epochs, clock-domain-tagged timestamps
 and synchronous backend interfaces. The host continues to own network negotiation.
 
+Shared limiter, gain smoothing and signal measurement implementations have moved
+to the core crate. CLI compatibility modules re-export those exact implementations;
+the SDK signal analyzer is only a zero-copy wrapper. The limiter's original tests
+now run independently of the SDK. Host device telemetry remains in CLIClient.
+
 The existing production device, receive scheduler, Sonora and Opus implementations
 remain in CLIClient until their corresponding extraction and regression gates pass.
 The full platform engine, unified scheduler and CLI/Slint test UI are not implemented

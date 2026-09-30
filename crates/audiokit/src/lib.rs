@@ -5,8 +5,11 @@
 
 pub mod backend;
 pub mod block;
+pub mod diagnostics;
 pub mod error;
 pub mod format;
+pub mod limiter;
+pub mod mix;
 
 pub use block::{
     AudioBlock, BlockContext, ClockDomain, ClockTimestamp, SourceId, SourceKey, StreamEpoch,
