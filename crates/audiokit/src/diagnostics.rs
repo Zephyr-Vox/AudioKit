@@ -2,67 +2,38 @@
 
 use thiserror::Error;
 
-const TRUE_PEAK_TAPS_PER_PHASE: usize = 12;
-pub(crate) const TRUE_PEAK_GROUP_DELAY_FRAMES: usize = 6;
-// Four-phase FIR interpolator from ITU-R BS.1770-5, Annex 2.
-const TRUE_PEAK_PHASES: [[f64; TRUE_PEAK_TAPS_PER_PHASE]; 4] = [
-    [
-        0.001708984375,
-        0.010986328125,
-        -0.0196533203125,
-        0.033203125,
-        -0.0594482421875,
-        0.1373291015625,
-        0.97216796875,
-        -0.102294921875,
-        0.047607421875,
-        -0.026611328125,
-        0.014892578125,
-        -0.00830078125,
-    ],
-    [
-        -0.0291748046875,
-        0.029296875,
-        -0.0517578125,
-        0.089111328125,
-        -0.16650390625,
-        0.465087890625,
-        0.77978515625,
-        -0.2003173828125,
-        0.1015625,
-        -0.0582275390625,
-        0.0330810546875,
-        -0.0189208984375,
-    ],
-    [
-        -0.0189208984375,
-        0.0330810546875,
-        -0.0582275390625,
-        0.1015625,
-        -0.2003173828125,
-        0.77978515625,
-        0.465087890625,
-        -0.16650390625,
-        0.089111328125,
-        -0.0517578125,
-        0.029296875,
-        -0.0291748046875,
-    ],
-    [
-        -0.00830078125,
-        0.014892578125,
-        -0.026611328125,
-        0.047607421875,
-        -0.102294921875,
-        0.97216796875,
-        0.1373291015625,
-        -0.0594482421875,
-        0.033203125,
-        -0.0196533203125,
-        0.010986328125,
-        0.001708984375,
-    ],
-];
+const TRUE_PEAK_TAPS_PER_PHASE: usize = 128;
+pub(crate) const TRUE_PEAK_GROUP_DELAY_FRAMES: usize = 64;
+const TRUE_PEAK_OVERSAMPLING: usize = 4;
+fn true_peak_phases() -> &'static [[f64; TRUE_PEAK_TAPS_PER_PHASE]; TRUE_PEAK_OVERSAMPLING] {
+    use std::{f64::consts::PI, sync::OnceLock};
+    static PHASES: OnceLock<[[f64; TRUE_PEAK_TAPS_PER_PHASE]; TRUE_PEAK_OVERSAMPLING]> =
+        OnceLock::new();
+    PHASES.get_or_init(|| {
+        let mut phases = [[0.0; TRUE_PEAK_TAPS_PER_PHASE]; TRUE_PEAK_OVERSAMPLING];
+        for (phase, taps) in phases.iter_mut().enumerate() {
+            for (tap, coefficient) in taps.iter_mut().enumerate() {
+                let distance = tap as f64
+                    - (TRUE_PEAK_TAPS_PER_PHASE / 2 - 1) as f64
+                    - phase as f64 / TRUE_PEAK_OVERSAMPLING as f64;
+                let sinc = if distance.abs() < 1e-12 {
+                    1.0
+                } else {
+                    (PI * distance).sin() / (PI * distance)
+                };
+                let window = 0.5
+                    - 0.5 * (2.0 * PI * tap as f64 / (TRUE_PEAK_TAPS_PER_PHASE - 1) as f64).cos();
+                *coefficient = sinc * window;
+            }
+            let sum = taps.iter().sum::<f64>();
+            for coefficient in taps.iter_mut() {
+                *coefficient /= sum;
+            }
+            taps.reverse();
+        }
+        phases
+    })
+}
 
 /// Runtime-adjustable thresholds used by signal diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -361,26 +332,28 @@ impl AudioSignalAnalyzer {
     }
 }
 
-/// Stateful 4x true-peak interpolation shared by diagnostics and the limiter.
+/// Stateful 4x, 128-tap Hann-sinc reconstruction shared by diagnostics and the limiter.
 #[derive(Debug, Clone)]
 pub(crate) struct TruePeakEstimator {
-    history: Vec<[f64; TRUE_PEAK_TAPS_PER_PHASE]>,
+    history: Vec<[f64; TRUE_PEAK_TAPS_PER_PHASE * 2]>,
     cursor: usize,
 }
 
 impl TruePeakEstimator {
     pub(crate) fn new(channels: usize) -> Self {
+        // Initialize outside the sample path; observe only reads immutable coefficients.
+        let _ = true_peak_phases();
         Self {
-            history: vec![[0.0; TRUE_PEAK_TAPS_PER_PHASE]; channels],
+            history: vec![[0.0; TRUE_PEAK_TAPS_PER_PHASE * 2]; channels],
             cursor: 0,
         }
     }
 
     pub(crate) fn reset(&mut self, channels: usize) {
         if self.history.len() != channels {
-            self.history = vec![[0.0; TRUE_PEAK_TAPS_PER_PHASE]; channels];
+            self.history = vec![[0.0; TRUE_PEAK_TAPS_PER_PHASE * 2]; channels];
         } else {
-            self.history.fill([0.0; TRUE_PEAK_TAPS_PER_PHASE]);
+            self.history.fill([0.0; TRUE_PEAK_TAPS_PER_PHASE * 2]);
         }
         self.cursor = 0;
     }
@@ -389,16 +362,27 @@ impl TruePeakEstimator {
         let cursor = self.cursor;
         let history = &mut self.history[channel];
         history[cursor] = sample;
+        history[cursor + TRUE_PEAK_TAPS_PER_PHASE] = sample;
         let mut peak = sample.abs();
-        for phase in TRUE_PEAK_PHASES {
-            let interpolated = phase
+        // Mirrored history makes every FIR window contiguous: no per-tap modulo.
+        // Phase zero is an exact sample, not a fractional interpolation.
+        let window = &history[cursor + 1..cursor + 1 + TRUE_PEAK_TAPS_PER_PHASE];
+        peak = peak.max(window[TRUE_PEAK_TAPS_PER_PHASE / 2].abs());
+        for phase in &true_peak_phases()[1..] {
+            // Independent accumulators expose instruction-level parallelism without
+            // fast-math, architecture-specific unsafe code or changing the kernel.
+            let mut sums = [0.0; 4];
+            for (samples, weights) in window
+                .as_chunks::<4>()
+                .0
                 .iter()
-                .enumerate()
-                .fold(0.0, |sum, (tap, coefficient)| {
-                    let history_index =
-                        (cursor + TRUE_PEAK_TAPS_PER_PHASE - tap) % TRUE_PEAK_TAPS_PER_PHASE;
-                    sum + coefficient * history[history_index]
-                });
+                .zip(phase.as_chunks::<4>().0)
+            {
+                for lane in 0..4 {
+                    sums[lane] += samples[lane] * weights[lane];
+                }
+            }
+            let interpolated = sums.iter().sum::<f64>();
             peak = peak.max(interpolated.abs());
         }
         if channel + 1 == channels {

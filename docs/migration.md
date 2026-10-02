@@ -42,7 +42,10 @@ CPAL and Windows process capture port building blocks are independent of SDK/Tok
 Virtual tests call production sample conversion and reference publication, guard
 alloc/free/realloc, and check startup silence, overflow, underrun and actual integer
 quantization. Windows activation arguments survive an abandoned timeout receiver;
-native PID ownership and process exit monitoring are retained. Tests do not open devices.
+native PID ownership and process exit monitoring are retained. Borrowed VT_BLOB
+arguments are disarmed before PROPVARIANT teardown so a foreign deallocator cannot
+free the Rust-owned parameters. The CLI reuses this activation owner; other native
+port plumbing remains pending A6. Tests do not open devices.
 
 Shared capture/receive/render owners are implemented. Decoder work occurs only on
 bounded device demand, not arrivals. Source admission defaults to 32 and may be
@@ -66,3 +69,15 @@ adapter; supporting them is an outstanding resampler boundary improvement.
 SPEC files remain uncommitted. Windows Rust 1.98 is the tested environment; macOS,
 Linux and the declared Rust 1.91 floor have not been revalidated. CLI legacy Clippy
 lints remain visible; no broad warning suppression is introduced.
+
+The true-peak correction is a separate behavior change: a longer independently
+validated production FIR plus configurable reconstruction headroom, not a silent
+relocation. See `algorithms.md`. Current validation: 72 AudioKit tests, 160 CLI unit
+tests and 25 CLI integration tests pass. AudioKit all-target/all-feature strict
+Clippy and warning-as-error Rustdoc pass. CLI Release checks pass; its pre-existing
+strict Clippy failures are not reported as a successful gate.
+
+Local evidence is retained under `target/validation/`: complete workspace test log,
+independent oracle log and release worker budget JSON. CLI results remain under
+`../CLIClient/target/audiokit-baseline/final-cli.log`. Generated artifacts and user
+recordings are not committed.

@@ -23,8 +23,13 @@ smoothing and peak/RMS/discontinuity measurements. Their validated settings and
 sample history are preserved during relocation. These are worker APIs, not
 device-callback-safe APIs: construction, format changes and returned buffers can
 allocate. A discontinuity candidate is not proof of an audible click. The current
-4x FIR true-peak detector is shared by the limiter and diagnostics; a second,
-independent test oracle is still required before claiming a true-peak guarantee.
+4x, 128-tap Hann-sinc detector is shared by the limiter and diagnostics. A separate
+16x, 128-tap Blackman-sinc oracle verifies common-rate, mono/stereo burst signals
+across phases, including startup and complete tails. This is a finite regression
+corpus, not a universal reconstruction guarantee for arbitrary near-Nyquist PCM.
+`reconstruction_headroom_db` defaults to 0.2 dB (configurable 0..=1) to protect
+finite interpolation and gain-modulation residuals. Effective limiter lookahead
+is at least 64 frames; the actual delay is reported, not inferred from 3 ms alone.
 
 ## Sonora Backend
 

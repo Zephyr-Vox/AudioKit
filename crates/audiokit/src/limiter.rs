@@ -16,6 +16,14 @@ pub struct LimiterConfig {
     pub attack_ms: f32,
     /// Exponential return time after the signal falls below the ceiling.
     pub release_ms: f32,
+    /// Extra detector target headroom for finite interpolation and gain-modulated transients.
+    /// Default 0.2 dB was selected from the independent reconstruction corpus; 0..=1 dB.
+    /// This is not a claim of a mathematical bound for arbitrary near-Nyquist signals.
+    #[serde(default = "default_reconstruction_headroom_db")]
+    pub reconstruction_headroom_db: f32,
+}
+const fn default_reconstruction_headroom_db() -> f32 {
+    0.2
 }
 
 impl Default for LimiterConfig {
@@ -25,6 +33,7 @@ impl Default for LimiterConfig {
             lookahead_ms: 3.0,
             attack_ms: 1.0,
             release_ms: 100.0,
+            reconstruction_headroom_db: default_reconstruction_headroom_db(),
         }
     }
 }
@@ -36,6 +45,7 @@ impl LimiterConfig {
             || !self.lookahead_ms.is_finite()
             || !self.attack_ms.is_finite()
             || !self.release_ms.is_finite()
+            || !self.reconstruction_headroom_db.is_finite()
         {
             return Err(LimiterConfigError::NotFinite);
         }
@@ -43,6 +53,7 @@ impl LimiterConfig {
             || !(1.0..=10.0).contains(&self.lookahead_ms)
             || !(0.1..=5.0).contains(&self.attack_ms)
             || !(30.0..=300.0).contains(&self.release_ms)
+            || !(0.0..=1.0).contains(&self.reconstruction_headroom_db)
         {
             return Err(LimiterConfigError::OutOfRange);
         }
@@ -99,7 +110,7 @@ pub enum LimiterConfigError {
     NotFinite,
     /// One or more parameters are outside their supported range.
     #[error(
-        "ceiling_dbfs must be -18..=-0.5, lookahead_ms 1..=10, attack_ms 0.1..=5, and release_ms 30..=300"
+        "ceiling_dbfs must be -18..=-0.5, lookahead_ms 1..=10, attack_ms 0.1..=5, release_ms 30..=300, and reconstruction_headroom_db 0..=1"
     )]
     OutOfRange,
     /// The attack window cannot be longer than the available lookahead.
@@ -151,6 +162,7 @@ pub struct MasterLimiter {
     channels: usize,
     config: LimiterConfig,
     ceiling: f32,
+    detector_ceiling: f32,
     lookahead_frames: usize,
     attack_frames: usize,
     release_coefficient: f32,
@@ -186,6 +198,8 @@ impl MasterLimiter {
             channels: usize::from(channels),
             config,
             ceiling: 10.0_f32.powf(config.ceiling_dbfs / 20.0),
+            detector_ceiling: 10.0_f32
+                .powf((config.ceiling_dbfs - config.reconstruction_headroom_db) / 20.0),
             lookahead_frames,
             attack_frames,
             release_coefficient,
@@ -263,8 +277,8 @@ impl MasterLimiter {
                             self.channels,
                         ))
                     }) as f32;
-            // The 48-tap interpolator has a 5.875-frame group delay; attribute
-            // its estimate to the nearest source frame before that frame enters lookahead.
+            // Fractional phases reconstruct positions 63..63.75 frames behind ingress.
+            // Attribute their maximum to the nearest delayed frame before it is emitted.
             let true_peak_frame =
                 (write_frame + delay_frames - TRUE_PEAK_GROUP_DELAY_FRAMES) % delay_frames;
             self.true_peak_delay[true_peak_frame] = true_peak;
@@ -278,10 +292,10 @@ impl MasterLimiter {
                     .iter()
                     .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
                 let peak = sample_peak.max(self.true_peak_delay[frame_index]);
-                let target = if peak > self.ceiling {
+                let target = if peak > self.detector_ceiling {
                     // Keep a few ULPs below the ceiling so f32 division and
                     // multiplication cannot turn an exact target into a clamp.
-                    (self.ceiling * (1.0 - 4.0 * f32::EPSILON)) / peak
+                    (self.detector_ceiling * (1.0 - 4.0 * f32::EPSILON)) / peak
                 } else {
                     1.0
                 };
