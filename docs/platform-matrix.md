@@ -5,11 +5,20 @@
 | Core formats/clock/blocks | compiled, offline-tested | not repeated | not repeated |
 | Shared limiter/gain/measure | compiled, offline-tested | not repeated | not repeated |
 | Sonora backend | compiled, offline-tested | not repeated | not repeated |
-| Core/backend device access | absent | absent | absent |
-| Native production adapter | still in CLIClient | still in CLIClient | still in CLIClient |
+| Shared capture/receive/render graphs | compiled, deterministic virtual tests | not repeated | not repeated |
+| CPAL ports and actual-consumed reference | compiled, virtual conversion/allocation tests; hardware not tested | not repeated | not repeated |
+| WASAPI process loopback | compiled, activation lifetime/flags tests; hardware not tested | unavailable | unavailable |
+| Native production host adapter | still in CLIClient, A6 pending | still in CLIClient | still in CLIClient |
 | CLI/Slint shared test app | not yet extracted | not yet extracted | not yet extracted |
 
 The prior accepted Windows/macOS listening results describe the frozen client
 baseline, not hardware verification of a new AudioKit device engine. This milestone
 does not open a microphone or speaker. Core and Sonora need no Opus C toolchain;
-the CLI still uses libopus through its old codec adapter.
+the optional codec backend uses libopus. CPAL raw clock and Windows QPC metadata
+are retained but are not interchangeable with host presentation timestamps.
+
+Windows endpoint loopback is exposed through an output-device CPAL capture port;
+it is not a cross-platform desktop capture promise. Linux ALSA/PipeWire and macOS
+system/process capture capability, permissions, hotplug and cancellation still need
+platform-specific verification. AEC processing exists, but duplex reference timing
+must be calibrated on the actual devices before a host enables it.

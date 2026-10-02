@@ -44,5 +44,34 @@ against an independently constructed pre-extraction Sonora configuration.
 cargo run -p audiokit-processing-sonora --example voice_quantum --offline
 ```
 
-This workspace still has no transport/device backend or Slint GUI. Moving those
-components is a later milestone, not implied by the backend example.
+## Codec, Ports and Graphs
+
+`audiokit-codec-opus` owns exclusive worker codecs. Voice is mono VoIP at
+64..=128 kbps (default 96); desktop is stereo Audio at 128..=320 (default 196).
+Ptime is fixed per session, normally 20 ms, with negotiated 10/40/60 ms support.
+Payload budgeting applies only to enabled streams. libopus needs a C toolchain;
+it is not part of the core or Sonora-only dependency graph.
+
+The optional `audiokit-platform` crate has CPAL capture/playback and actual-consumed
+reference ports (`native-cpal`), plus Windows process-tree loopback
+(`windows-process-loopback`). Fixed-capacity SPSC endpoints carry native cursors,
+raw timestamps and flags. Sample callbacks do not allocate, lock, perform DSP,
+write files or call async APIs. OS error callbacks are a separate backend boundary.
+
+The core's default `resampling` feature adds continuous f32 conversion and shared
+`CaptureGraph`, `ReceiveGraph` and `RenderGraph`. The receiver is driven by device
+demand, with one encoded startup window, source/epoch-isolated codecs/DSP, bounded
+queues, FEC/PLC, independent speech/media activity normalization and finite drain.
+Arrival-time drift is explicitly inferred, not presented as a remote measured clock.
+
+```sh
+cargo test -p audiokit --no-default-features --offline
+cargo test --workspace --all-features --offline
+cargo run -p audiokit --release --example render_budget --offline
+```
+
+See `docs/host-integration.md` for worker ownership and timing contracts.
+The testkit crate and CLI/Slint application have not been started (A5 boundary).
+The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
+receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
+is implied by the deterministic tests in this workspace.

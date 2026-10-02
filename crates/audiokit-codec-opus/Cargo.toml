@@ -1,18 +1,20 @@
 [package]
-name = "audiokit-processing-sonora"
+name = "audiokit-codec-opus"
+description = "Exclusive per-stream Opus encoders and decoders for AudioKit"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SDK-independent Sonora voice processing backend for AudioKit"
 
 [dependencies]
 audiokit = { path = "../audiokit", default-features = false }
+
+opus.workspace = true
 serde.workspace = true
-sonora.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+audiokit = { path = "../audiokit", features = ["resampling"] }
 
 [lints]
 workspace = true

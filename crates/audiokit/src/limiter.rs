@@ -201,6 +201,10 @@ impl MasterLimiter {
     pub fn config(&self) -> LimiterConfig {
         self.config
     }
+    /// Returns actual delay, including the reconstruction window's minimum lookahead.
+    pub fn lookahead_frames(&self) -> usize {
+        self.lookahead_frames
+    }
 
     /// Reconfigures the limiter, clearing its delay and gain history.
     ///
