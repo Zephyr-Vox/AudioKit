@@ -25,3 +25,24 @@ device-callback-safe APIs: construction, format changes and returned buffers can
 allocate. A discontinuity candidate is not proof of an audible click. The current
 4x FIR true-peak detector is shared by the limiter and diagnostics; a second,
 independent test oracle is still required before claiming a true-peak guarantee.
+
+## Sonora Backend
+
+`audiokit-processing-sonora` supplies AEC3, noise suppression and AGC2 with
+independent capture/render formats. `VoiceProcessor` works on interleaved f32
+10 ms blocks without passing through i16. Mono/stereo 8/16/32/48 kHz are supported;
+other device rates need graph resampling. Full float bypass returns unchanged
+samples, even where Sonora itself would otherwise insert internal conversion.
+Enabled processing delay is unavailable from the library and reported as `None`.
+
+The accepted defaults remain Moderate suppression, high-pass on, AGC2 on and
+adaptive gain off. The transitional i16 entry points keep the production CLI's
+conversion path unchanged; a two-second, seeded test compares its output exactly
+against an independently constructed pre-extraction Sonora configuration.
+
+```sh
+cargo run -p audiokit-processing-sonora --example voice_quantum --offline
+```
+
+This workspace still has no transport/device backend or Slint GUI. Moving those
+components is a later milestone, not implied by the backend example.

@@ -1,0 +1,18 @@
+[package]
+name = "audiokit-processing-sonora"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SDK-independent Sonora voice processing backend for AudioKit"
+
+[dependencies]
+audiokit = { path = "../audiokit" }
+serde.workspace = true
+sonora.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
