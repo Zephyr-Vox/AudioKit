@@ -122,6 +122,107 @@ fn receiver(source: SourceRegistration) -> (ReceiveGraph, Arc<Mutex<Vec<String>>
 }
 
 #[test]
+fn recovery_and_epoch_replacement_do_not_unmute_a_source() {
+    let mut source = registration(1, StreamKind::Voice);
+    let (mut graph, log) = receiver(source);
+    graph.set_gain(source.key, 0.0).unwrap();
+    let mut output = [0.0; 1920];
+    let mut now = 0;
+    for boundary in 0..3 {
+        match boundary {
+            0 => {
+                source.epoch = StreamEpoch(2);
+                graph
+                    .register(
+                        source,
+                        Box::new(Decoder {
+                            format: source.format,
+                            log: Arc::clone(&log),
+                            wrong_frames: false,
+                        }),
+                    )
+                    .unwrap();
+            }
+            1 => {
+                assert_eq!(
+                    graph.push_packet(packet(source, 1000, now)).unwrap(),
+                    PacketOutcome::Resynchronized
+                );
+            }
+            _ => graph.recover_clock().unwrap(),
+        }
+        let sequence = if boundary == 1 { 1000 } else { 0 };
+        for offset in 0..4 {
+            graph
+                .push_packet(packet(source, sequence + offset, now))
+                .unwrap();
+        }
+        for _ in 0..3 {
+            now += 20_000_000;
+            let metrics = graph.render_into(&mut output, now).unwrap();
+            assert_eq!(metrics.sources[0].gain, 0.0);
+            assert!(!metrics.sources[0].active);
+            assert!(output.iter().all(|sample| *sample == 0.0));
+        }
+    }
+    assert!(log.lock().unwrap().iter().any(|kind| kind == "normal"));
+}
+
+#[test]
+fn receive_fifo_admission_covers_the_maximum_demand_before_decoding() {
+    let source = registration(1, StreamKind::Voice);
+    let log = Arc::new(Mutex::new(Vec::new()));
+    for (capacity, admitted) in [(80, false), (110, true)] {
+        let mut graph = ReceiveGraph::new(ReceiveGraphConfig {
+            render: RenderGraphConfig {
+                max_render_ms: 60,
+                max_source_queue_ms: capacity,
+                ..Default::default()
+            },
+            jitter: JitterBufferConfig {
+                target_ms: 20,
+                in_band_fec: true,
+            },
+            ..Default::default()
+        })
+        .unwrap();
+        let result = graph.register(
+            source,
+            Box::new(Decoder {
+                format: source.format,
+                log: Arc::clone(&log),
+                wrong_frames: false,
+            }),
+        );
+        assert_eq!(result.is_ok(), admitted);
+        assert_eq!(graph.source_count(), usize::from(admitted));
+        assert!(log.lock().unwrap().is_empty());
+        if admitted {
+            for sequence in 0..3 {
+                graph.push_packet(packet(source, sequence, 0)).unwrap();
+            }
+            graph.render_into(&mut [0.0; 5760], 60_000_000).unwrap();
+            assert_eq!(*log.lock().unwrap(), ["normal", "normal", "normal"]);
+        }
+    }
+}
+
+#[test]
+fn render_eof_rate_padding_is_reported_once_and_is_not_an_underrun() {
+    let source = registration(1, StreamKind::Voice);
+    let mut graph = RenderGraph::new(Default::default()).unwrap();
+    graph.register(source).unwrap();
+    graph
+        .push_pcm(source.key, source.epoch, &[0.2; 135])
+        .unwrap();
+    graph.begin_drain().unwrap();
+    graph.begin_drain().unwrap();
+    let metrics = graph.render_into(&mut [0.0; 1920]).unwrap();
+    assert_eq!(metrics.sources[0].rate_eof_padding_frames, 345);
+    assert_eq!(metrics.sources[0].missing_frames, 0);
+}
+
+#[test]
 fn capture_is_chunk_invariant_and_accounts_eof_once() {
     let input = vec![0.25; 11_777 * 2];
     let run = |chunk: usize| {

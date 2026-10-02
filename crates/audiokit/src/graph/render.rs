@@ -130,6 +130,8 @@ pub struct SourceRenderMetrics {
     pub resampler_delay_frames: u64,
     /// PCM awaiting a complete rate-correction quantum, in render-clock frames.
     pub rate_staging_frames: u64,
+    /// Cumulative zeros added only to complete the final rate-correction quantum at EOF.
+    pub rate_eof_padding_frames: u64,
 }
 
 /// One render call's common cursor and stage measurements.
@@ -169,6 +171,7 @@ struct Source {
     corrector: PcmClockDriftCorrector,
     quantum_samples: usize,
     clock_ppm: i32,
+    rate_eof_padding_frames: u64,
 }
 
 /// One worker-owned render graph. Arrival submits PCM; only render demand advances the cursor.
@@ -279,6 +282,7 @@ impl RenderGraph {
             )?,
             quantum_samples: shape.interleaved_samples(),
             clock_ppm: 0,
+            rate_eof_padding_frames: 0,
         })
     }
     /// Registers an isolated source; an existing key requires an explicit epoch replacement.
@@ -300,7 +304,7 @@ impl RenderGraph {
         self.sources.insert(registration.key, source);
         Ok(())
     }
-    /// Atomically replaces a source after validating fresh DSP/resampler state for a new epoch.
+    /// Replaces DSP state for a new epoch while preserving the host's target gain/mute policy.
     pub fn replace_source(&mut self, registration: SourceRegistration) -> AudioResult<()> {
         if self
             .sources
@@ -317,10 +321,12 @@ impl RenderGraph {
         if self.state != GraphState::Running {
             return Err(AudioError::Cancelled);
         }
-        if !self.sources.contains_key(&registration.key) {
+        let Some(previous) = self.sources.get(&registration.key) else {
             return self.register(registration);
-        }
-        let source = self.build_source(registration)?;
+        };
+        let target_gain = previous.target_gain;
+        let mut source = self.build_source(registration)?;
+        source.target_gain = target_gain;
         self.sources.insert(registration.key, source);
         Ok(())
     }
@@ -520,6 +526,7 @@ impl RenderGraph {
                 clock_correction_ppm: source.clock_ppm,
                 resampler_delay_frames: source.converter.accounting().delay_frames as u64,
                 rate_staging_frames: source.rate_fifo.len() as u64 / u64::from(source_channels),
+                rate_eof_padding_frames: source.rate_eof_padding_frames,
             });
             source.started |= available > 0;
         }
@@ -586,6 +593,8 @@ impl RenderGraph {
             if !source.rate_fifo.is_empty() {
                 let remainder = source.rate_fifo.len() % source.quantum_samples;
                 if remainder != 0 {
+                    source.rate_eof_padding_frames += (source.quantum_samples - remainder) as u64
+                        / u64::from(source.registration.format.channels());
                     source
                         .rate_fifo
                         .extend(std::iter::repeat_n(0.0, source.quantum_samples - remainder));

@@ -253,9 +253,11 @@ impl ReceiveGraph {
             ));
         }
         let duration = decoder.packet_duration();
-        if self.config.render.max_source_queue_ms < duration.milliseconds() + 30 {
+        if self.config.render.max_source_queue_ms
+            < self.config.render.max_render_ms + duration.milliseconds() + 30
+        {
             return Err(AudioError::InvalidConfig(
-                "source FIFO needs ptime plus 30 ms filter/rate headroom".into(),
+                "source FIFO needs maximum demand plus ptime and 30 ms filter/rate headroom".into(),
             ));
         }
         let pcm = vec![
