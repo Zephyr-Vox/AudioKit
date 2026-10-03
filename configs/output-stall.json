@@ -1,0 +1,11 @@
+{
+  "scenario": "file-roundtrip",
+  "processing": { "enabled": false },
+  "execution_profiling": true,
+  "scheduler": {
+    "enabled": true,
+    "output_pause": { "start_ms": 1000, "duration_ms": 80 },
+    "output_capacity_samples": 4096,
+    "discard_on_output_resume": true
+  }
+}

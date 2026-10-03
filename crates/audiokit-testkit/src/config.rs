@@ -89,6 +89,10 @@ pub struct RunConfig {
     pub transport: crate::TransportConfig,
     /// Independent capture and render sample-clock rates for virtual roundtrip only.
     pub clocks: crate::ClockConfig,
+    /// Optional worker substage clocks; disabled by default, does not alter DSP parameters.
+    pub execution_profiling: bool,
+    /// Independent worker/output pause model for virtual roundtrip; no OS scheduling claims.
+    pub scheduler: crate::SchedulerConfig,
     /// Source counts/gain/work budget for the render-only stress scenario.
     pub mix_stress: crate::MixStressConfig,
     /// External packet-recording resource budgets; no devices or network are opened.
@@ -118,6 +122,8 @@ impl Default for RunConfig {
             receive: Default::default(),
             transport: Default::default(),
             clocks: Default::default(),
+            execution_profiling: false,
+            scheduler: Default::default(),
             mix_stress: Default::default(),
             receive_simulation: Default::default(),
             max_input_bytes: 64 * 1024 * 1024,
@@ -195,6 +201,12 @@ impl RunConfig {
     pub(crate) fn validate_parameters(&self) -> Result<()> {
         self.transport.validate()?;
         self.clocks.validate()?;
+        self.scheduler.validate(self.receive.render.format)?;
+        if self.scheduler.enabled && self.scenario != Scenario::FileRoundtrip {
+            return Err(Error::Invalid(
+                "scheduler simulation requires file-roundtrip".into(),
+            ));
+        }
         self.mix_stress.validate()?;
         self.receive_simulation.validate()?;
         if self.scenario != Scenario::FileRoundtrip
@@ -395,6 +407,14 @@ impl RunConfig {
                 status,
             });
         }
+        stages.push(Stage {
+            id: "virtual_output_queue".into(),
+            status: if self.scheduler.enabled {
+                NodeStatus::Applied
+            } else {
+                NodeStatus::NotCovered
+            },
+        });
         for id in [
             "capture_device",
             "output_device",

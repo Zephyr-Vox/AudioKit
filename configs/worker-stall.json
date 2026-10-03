@@ -1,0 +1,10 @@
+{
+  "scenario": "file-roundtrip",
+  "processing": { "enabled": false },
+  "execution_profiling": true,
+  "scheduler": {
+    "enabled": true,
+    "worker_pause": { "start_ms": 1000, "duration_ms": 80 },
+    "recover_on_worker_resume": true
+  }
+}

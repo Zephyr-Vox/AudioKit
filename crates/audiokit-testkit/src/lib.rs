@@ -21,8 +21,10 @@ mod io;
 mod packet_trace;
 mod report;
 mod runner;
+mod scheduler;
 mod simulation;
 mod sweep;
+mod timing;
 mod transport;
 pub use bundle::{Analysis, Comparison, Evidence, analyze, compare, replay};
 pub use config::{
@@ -31,6 +33,7 @@ pub use config::{
 pub use packet_trace::{PacketSource, PacketTrace, ReceiveSimulationConfig, RecordedPacket};
 pub use report::{Artifact, Check, Diagnostics, Manifest, ReplayOrigin, TraceEvent};
 pub use runner::{Cancellation, ProgressEvent, ProgressUnit, run};
+pub use scheduler::{PauseConfig, SchedulerConfig};
 pub use simulation::{ClockConfig, MixStressConfig};
 pub use sweep::{SweepCase, SweepMatrix, SweepReport, sweep};
 pub use transport::TransportConfig;

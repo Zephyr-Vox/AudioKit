@@ -200,6 +200,7 @@ pub struct SourceClockMetrics {
 /// Device-demand receiver owning one decoder per source/stream/epoch and one render cursor.
 /// Protocol registration and transport remain host responsibilities; no async runtime is needed.
 pub struct ReceiveGraph {
+    execution_profiling: bool,
     config: ReceiveGraphConfig,
     render: RenderGraph,
     tracks: BTreeMap<SourceKey, Track>,
@@ -213,6 +214,7 @@ impl ReceiveGraph {
     pub fn new(config: ReceiveGraphConfig) -> AudioResult<Self> {
         let config = config.validate()?;
         Ok(Self {
+            execution_profiling: false,
             config,
             render: RenderGraph::new(config.render)?,
             tracks: BTreeMap::new(),
@@ -228,6 +230,11 @@ impl ReceiveGraph {
     /// Returns validated effective graph policy; backend controls remain with backend instances.
     pub fn config(&self) -> ReceiveGraphConfig {
         self.config
+    }
+    /// Enables detailed decoder/admission/render worker timing without resetting audio state.
+    pub fn set_execution_profiling(&mut self, enabled: bool) {
+        self.execution_profiling = enabled;
+        self.render.set_execution_profiling(enabled);
     }
     /// Returns lifecycle state; abort and drain are explicit and idempotent.
     pub fn state(&self) -> GraphState {
@@ -460,6 +467,8 @@ impl ReceiveGraph {
                 self.stats.expired_sources += 1;
             }
         }
+        let decode_before = self.stats.decoding_execution_ns;
+        let mut pcm_admission_ns = 0_u64;
         for (key, track) in &mut self.tracks {
             let correction = if !draining && now_ns >= track.freeze_clock_until_ns {
                 match (self.device_rate.estimate(), track.rate.estimate()) {
@@ -547,12 +556,28 @@ impl ReceiveGraph {
                     track.freeze_clock_until_ns = now_ns.saturating_add(500_000_000);
                     track.pcm.fill(0.0);
                 }
+                let admission_started = self.execution_profiling.then(std::time::Instant::now);
                 self.render
                     .push_pcm(*key, track.registration.epoch, &track.pcm)?;
+                if let Some(start) = admission_started {
+                    pcm_admission_ns =
+                        pcm_admission_ns.saturating_add(
+                            start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+                        );
+                }
                 track.next = Some(sequence.wrapping_add(1));
             }
         }
-        self.render.render_demand(output, draining)
+        let mut metrics = self.render.render_demand(output, draining)?;
+        if let Some(profile) = &mut metrics.execution_profile {
+            profile.decode_ns = Some(
+                self.stats
+                    .decoding_execution_ns
+                    .saturating_sub(decode_before),
+            );
+            profile.pcm_admission_ns = Some(pcm_admission_ns);
+        }
+        Ok(metrics)
     }
     /// Returns clock inference quality and bounds for each source without inventing remote timestamps.
     pub fn clock_metrics(&self) -> Vec<SourceClockMetrics> {

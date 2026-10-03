@@ -104,8 +104,11 @@ JSON artifacts have a hard 32 MiB serialized bound on both write and import.
 
 Latency records identify measured execution, estimated backend algorithmic frames,
 configured ptime/startup or unknown/not-covered/bypassed stages. Empty timing sets
-have null total/max, not a fabricated zero. p50/p95/p99 remain null until bounded
-histograms land. CPU durations exclude trace serialization, artifact I/O and
+have null total/max, not a fabricated zero. Timing histograms separate ordinary
+budgeted calls and unbudgeted finish/drain calls. Their p50/p95/p99 are fixed-bin
+upper bounds, not exact samples (see `scheduler-profiling.md`). Optional production
+substage timings live in `latency.execution_profile`; disabled sets stay unavailable.
+CPU durations exclude trace serialization, artifact I/O and
 post-run analysis. Device/server and aligned E2E delay are unknown. No sum is
 reported that double-counts parallel work, buffering or codec/group delays.
 `virtual_forwarding` uses classification `simulated`; its maximum is due time
@@ -135,5 +138,10 @@ selections, non-accepted arrivals, source missing frames and master safety clamp
 The `worker_budget_overrun` flag identifies measured worker calls exceeding their
 simulated demand budget, not proof of an audible interruption.
 Observation order is not asserted causal order or first audible-defect location.
+Optional scheduler evidence separately flags worker/consumer pauses, recovery,
+queue underrun, overflow and discard; queue sample ranges use `virtual_consumer`.
+Aggregate queue conservation and counters survive truncation. Virtual stall time
+is never included in measured worker execution or represented as actual device
+latency. See `scheduler-profiling.md` for the explicit resume/EOF host policies.
 Recorder loss remains a separate count. Sweep summaries are not run manifests:
 each case retains its own normal schema-1 diagnostic bundle and replay contract.

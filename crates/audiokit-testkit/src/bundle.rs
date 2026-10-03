@@ -185,6 +185,25 @@ pub struct Evidence {
 fn evidence_flags(event: &TraceEvent) -> Vec<String> {
     let mut flags = Vec::new();
     let metrics = &event.metrics;
+    if event.stage == "worker_clock_recovery" {
+        flags.push("worker_clock_recovery".into());
+    }
+    if event.stage == "output_queue" {
+        for key in ["worker_paused", "output_paused"] {
+            if metrics[key] == true {
+                flags.push(format!("injection_{key}"));
+            }
+        }
+        for (key, flag) in [
+            ("underrun_frames", "output_queue_underrun"),
+            ("overflow_frames", "output_queue_overflow"),
+            ("discarded_frames", "output_queue_discard"),
+        ] {
+            if metrics[key].as_u64().unwrap_or(0) > 0 {
+                flags.push(flag.into());
+            }
+        }
+    }
     if event.stage == "transport_schedule" {
         for (key, flag) in [
             ("dropped", "injection_drop"),

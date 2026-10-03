@@ -57,6 +57,8 @@ struct Execution {
     over_budget_calls: u64,
     max_overrun_ns: u64,
     min_budget_ns: Option<u64>,
+    ordinary: crate::timing::Histogram,
+    unbudgeted: crate::timing::Histogram,
 }
 impl Execution {
     fn record(&mut self, start: Instant) {
@@ -71,17 +73,21 @@ impl Execution {
         self.total_ns = self.total_ns.saturating_add(elapsed);
         self.max_ns = self.max_ns.max(elapsed);
         if let Some(budget) = budget {
+            self.ordinary.observe(elapsed);
             self.budgeted_calls += 1;
             self.min_budget_ns = Some(self.min_budget_ns.map_or(budget, |old| old.min(budget)));
             if elapsed > budget {
                 self.over_budget_calls += 1;
                 self.max_overrun_ns = self.max_overrun_ns.max(elapsed - budget);
             }
+        } else {
+            self.unbudgeted.observe(elapsed);
         }
         elapsed
     }
     fn value(&self) -> Value {
-        json!({"classification":if self.calls == 0 {"unavailable"} else {"measured"}, "method":"Instant around worker call; excludes tracing and artifact I/O", "calls":self.calls, "total_ns":if self.calls == 0 { None } else { Some(self.total_ns) }, "max_ns": if self.calls == 0 { None } else { Some(self.max_ns) }, "p50_ns":null, "p95_ns":null, "p99_ns":null, "percentiles_reason":"histogram instrumentation not yet implemented",
+        json!({"classification":if self.calls == 0 {"unavailable"} else {"measured"}, "method":"Instant around worker call; excludes tracing and artifact I/O", "calls":self.calls, "total_ns":if self.calls == 0 { None } else { Some(self.total_ns) }, "max_ns": if self.calls == 0 { None } else { Some(self.max_ns) },
+            "ordinary":self.ordinary.value(), "unbudgeted":self.unbudgeted.value(),
             "budgeted_calls":self.budgeted_calls,"min_budget_ns":self.min_budget_ns,
             "over_budget_calls":if self.budgeted_calls == 0 { None } else { Some(self.over_budget_calls) },
             "max_overrun_ns":if self.budgeted_calls == 0 { None } else { Some(self.max_overrun_ns) },
@@ -98,6 +104,41 @@ fn render_evidence(
     recorded["worker_budget_ns"] = json!(budget);
     recorded["worker_over_budget"] = json!(elapsed > budget);
     recorded
+}
+fn ns_since(start: Instant) -> u64 {
+    start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+#[derive(Default)]
+struct ProfileTotals {
+    packet_admission: crate::timing::Histogram,
+    pcm_admission: crate::timing::Histogram,
+    decode: crate::timing::Histogram,
+    source_processing: crate::timing::Histogram,
+    mix: crate::timing::Histogram,
+    master_limiter: crate::timing::Histogram,
+    signal_analysis: crate::timing::Histogram,
+}
+impl ProfileTotals {
+    fn observe(&mut self, metrics: &audiokit::graph::render::RenderMetrics) {
+        if let Some(p) = &metrics.execution_profile {
+            if let Some(ns) = p.decode_ns {
+                self.decode.observe(ns);
+            }
+            if let Some(ns) = p.pcm_admission_ns {
+                self.pcm_admission.observe(ns);
+            }
+            self.source_processing.observe(p.source_processing_ns);
+            self.mix.observe(p.mix_ns);
+            self.master_limiter.observe(p.master_limiter_ns);
+            self.signal_analysis.observe(p.signal_analysis_ns);
+        }
+    }
+    fn value(&self) -> Value {
+        json!({"scope":"ordinary worker calls only, except packet admission includes final arrivals; no drain DSP; source processing/mix summed across sources per call; packet admission per packet; includes clock-read overhead; stages do not sum to end-to-end latency",
+            "packet_admission":self.packet_admission.value(),"pcm_admission":self.pcm_admission.value(),
+            "decode":self.decode.value(),"source_processing":self.source_processing.value(),
+            "mix":self.mix.value(),"master_limiter":self.master_limiter.value(),"signal_analysis":self.signal_analysis.value()})
+    }
 }
 #[derive(Default, serde::Serialize)]
 struct RenderTotals {
@@ -141,6 +182,7 @@ impl RenderTotals {
     }
 }
 struct Work {
+    profile: ProfileTotals,
     run_id: String,
     source_identity: (u64, u16, u64),
     output: Vec<f32>,
@@ -164,6 +206,7 @@ struct Work {
 impl Work {
     fn new(run_id: String) -> Self {
         Self {
+            profile: ProfileTotals::default(),
             run_id,
             source_identity: (1, 1, 1),
             output: Vec::new(),
@@ -228,17 +271,26 @@ impl Work {
             time_ns: time,
             first_frame: range.0,
             frames: range.1,
-            source_id: if stage == "render_output" {
+            source_id: if matches!(
+                stage,
+                "render_output" | "output_queue" | "worker_clock_recovery"
+            ) {
                 None
             } else {
                 Some(self.source_identity.0)
             },
-            stream_id: if stage == "render_output" {
+            stream_id: if matches!(
+                stage,
+                "render_output" | "output_queue" | "worker_clock_recovery"
+            ) {
                 None
             } else {
                 Some(self.source_identity.1)
             },
-            epoch: if stage == "render_output" {
+            epoch: if matches!(
+                stage,
+                "render_output" | "output_queue" | "worker_clock_recovery"
+            ) {
                 None
             } else {
                 Some(self.source_identity.2)
@@ -326,6 +378,7 @@ fn prepare_mix(config: &RunConfig, plan: &ExecutionPlan) -> Result<MixGraphs> {
     use audiokit::{SourceId, SourceKey, StreamEpoch, StreamId};
     let frontend = CapturePcmGraph::new(frontend_config(config, plan), None)?;
     let mut render = RenderGraph::new(config.receive.render)?;
+    render.set_execution_profiling(config.execution_profiling);
     let mut sources = Vec::new();
     for index in 0..config.mix_stress.sources {
         let source = SourceRegistration {
@@ -367,6 +420,7 @@ fn prepare_receive(
     source: audiokit::graph::render::SourceRegistration,
 ) -> Result<ReceiveGraphs> {
     let mut receive = audiokit::graph::receive::ReceiveGraph::new(config.receive)?;
+    receive.set_execution_profiling(config.execution_profiling);
     receive.register(
         source,
         Box::new(audiokit_codec_opus::OpusDecoder::new(
@@ -504,10 +558,14 @@ fn mix_file(
             if input.len() < input_quantum {
                 break;
             }
+            if config.execution_profiling {
+                work.profile.pcm_admission.observe(ns_since(started));
+            }
             let metrics = graphs.render.render_into(&mut output);
             let elapsed = work.receive_execution.record_budget(started, 10_000_000);
             let metrics = metrics?;
             work.render_totals.observe(&metrics);
+            work.profile.observe(&metrics);
             work.append(&output, config)?;
             work.event(
                 "render_output",
@@ -656,6 +714,7 @@ fn prepare_roundtrip(config: &RunConfig, plan: &ExecutionPlan) -> Result<Roundtr
         processor(config, plan)?,
     )?;
     let mut receive = ReceiveGraph::new(config.receive)?;
+    receive.set_execution_profiling(config.execution_profiling);
     let source = SourceRegistration {
         key: SourceKey {
             source: SourceId::new(1)?,
@@ -720,6 +779,7 @@ fn deliver_packets(
 ) -> Result<()> {
     use audiokit::graph::receive::EncodedPacket;
     while let Some(delivery) = transport.pop_due(now) {
+        let started = config.execution_profiling.then(Instant::now);
         let outcome = receive.push_packet(EncodedPacket {
             source: source.key,
             epoch: source.epoch,
@@ -728,6 +788,9 @@ fn deliver_packets(
             arrival_ns: delivery.due_ns,
             payload: delivery.payload,
         })?;
+        if let Some(started) = started {
+            work.profile.packet_admission.observe(ns_since(started));
+        }
         let frames = u64::from(source.format.sample_rate_hz())
             * u64::from(config.ptime.milliseconds())
             / 1000;
@@ -740,6 +803,83 @@ fn deliver_packets(
                 "duplicate_copy":delivery.duplicate,"emitted_ns":delivery.emitted_ns,
                 "delivery_delay_ns":delivery.due_ns-delivery.emitted_ns,"outcome":outcome,
                 "observed_by_callback_ns":now}),
+            config,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "codec-opus")]
+#[allow(clippy::too_many_arguments)]
+fn roundtrip_tick(
+    config: &RunConfig,
+    transport: &mut crate::transport::scheduler::Transport,
+    receive: &mut audiokit::graph::receive::ReceiveGraph,
+    source: audiokit::graph::render::SourceRegistration,
+    scheduler: &mut Option<crate::scheduler::OutputScheduler>,
+    output: &mut [f32],
+    now: u64,
+    budget: u64,
+    transport_tail: bool,
+    work: &mut Work,
+) -> Result<()> {
+    let before = scheduler.as_ref().map(|s| s.stats);
+    let (worker_paused, output_paused, recover) = scheduler
+        .as_mut()
+        .map_or((false, false, false), |s| s.begin_tick(now));
+    // Host policy is explicit, not hidden inside the estimator. Recovery runs
+    // before this tick's arrivals, so packets delivered now can restart playout.
+    if recover {
+        receive.recover_clock()?;
+        work.event("worker_clock_recovery", "virtual_host", now, (0, 0),
+            json!({"policy":"reset production receive histories and buffered packets; registered epoch unchanged"}), config)?;
+    }
+    // Transport/arrival admission continues even when the DSP worker is paused.
+    deliver_packets(transport, receive, source, now, work, config)?;
+    // The last delayed copy is network EOF, not a new ordinary demand. Do not
+    // advance PLC past material EOF merely because the output queue is enabled.
+    let network_eof = transport_tail && transport.is_empty();
+    if !worker_paused && !network_eof {
+        let started = Instant::now();
+        let metrics = receive.render_into(output, now);
+        let elapsed = work.receive_execution.record_budget(started, budget);
+        let metrics = metrics?;
+        work.render_totals.observe(&metrics);
+        work.profile.observe(&metrics);
+        work.last_source_clocks = json!(receive.clock_metrics());
+        let mut evidence = render_evidence(&metrics, elapsed, budget);
+        evidence["source_clocks"] = work.last_source_clocks.clone();
+        work.event(
+            "render_output",
+            "virtual_output",
+            now,
+            (metrics.sample_position, metrics.frames),
+            evidence,
+            config,
+        )?;
+        if let Some(s) = scheduler {
+            s.push(output, now);
+        } else {
+            work.append(output, config)?;
+        }
+    }
+    if let Some(s) = scheduler {
+        let first = s.stats.demanded_frames;
+        if !output_paused && (!network_eof || worker_paused) {
+            s.consume(output, now);
+            work.append(output, config)?;
+        }
+        let before = before.expect("scheduler snapshot");
+        work.event(
+            "output_queue",
+            "virtual_consumer",
+            now,
+            (first, s.stats.demanded_frames - first),
+            json!({"worker_paused":worker_paused,"output_paused":output_paused,
+                "queued_frames":s.queued_frames(),"statistics":s.stats,
+                "underrun_frames":s.stats.output_underrun_frames - before.output_underrun_frames,
+                "overflow_frames":s.stats.output_overflow_frames - before.output_overflow_frames,
+                "discarded_frames":s.stats.recovery_discarded_frames - before.recovery_discarded_frames}),
             config,
         )?;
     }
@@ -775,6 +915,11 @@ fn roundtrip(
     let mut output_clock = crate::simulation::SampleClock::new(config.clocks.render_rate_ppm);
     let render_budget_ns = output_clock.next_ns();
     let mut transport = crate::transport::scheduler::Transport::new(config.transport);
+    let mut scheduler = config
+        .scheduler
+        .enabled
+        .then(|| crate::scheduler::OutputScheduler::new(config.scheduler, plan.output_format))
+        .transpose()?;
     let result = (|| {
         for (i, block) in pcm.chunks(block_samples).enumerate() {
             if stop.is_cancelled() {
@@ -794,30 +939,17 @@ fn roundtrip(
             while output_clock.next_ns() <= now {
                 let output_ns = output_clock.next_ns();
                 output_clock.advance();
-                deliver_packets(
+                roundtrip_tick(
+                    config,
                     &mut transport,
                     &mut receive,
                     source,
+                    &mut scheduler,
+                    &mut output,
                     output_ns,
+                    render_budget_ns,
+                    false,
                     work,
-                    config,
-                )?;
-                let started = Instant::now();
-                let metrics = receive.render_into(&mut output, output_ns);
-                let elapsed = work
-                    .receive_execution
-                    .record_budget(started, render_budget_ns);
-                let metrics = metrics?;
-                work.render_totals.observe(&metrics);
-                work.last_source_clocks = json!(receive.clock_metrics());
-                work.append(&output, config)?;
-                work.event(
-                    "render_output",
-                    "virtual_output",
-                    output_ns,
-                    (metrics.sample_position, metrics.frames),
-                    render_evidence(&metrics, elapsed, render_budget_ns),
-                    config,
                 )?;
             }
             if i % 10 == 0 {
@@ -840,7 +972,11 @@ fn roundtrip(
         // are in flight. Only after the final scheduled copy is delivered may the
         // receiver drain, avoiding artificial PLC beyond the transport's lifetime.
         let mut waiting = 0;
-        while !transport.is_empty() {
+        while !transport.is_empty()
+            || config.scheduler.enabled
+                && (config.scheduler.worker_pause.active(now)
+                    || config.scheduler.output_pause.active(now))
+        {
             if stop.is_cancelled() {
                 receive.abort();
                 return Err(Error::Cancelled);
@@ -853,27 +989,27 @@ fn roundtrip(
             }
             now = output_clock.next_ns();
             output_clock.advance();
-            deliver_packets(&mut transport, &mut receive, source, now, work, config)?;
-            if transport.is_empty() {
+            if scheduler.is_none() {
+                deliver_packets(&mut transport, &mut receive, source, now, work, config)?;
+            }
+            if transport.is_empty() && scheduler.is_none() {
                 break;
             }
-            let started = Instant::now();
-            let metrics = receive.render_into(&mut output, now);
-            let elapsed = work
-                .receive_execution
-                .record_budget(started, render_budget_ns);
-            let metrics = metrics?;
-            work.render_totals.observe(&metrics);
-            work.last_source_clocks = json!(receive.clock_metrics());
-            work.append(&output, config)?;
-            work.event(
-                "render_output",
-                "virtual_output",
-                now,
-                (metrics.sample_position, metrics.frames),
-                render_evidence(&metrics, elapsed, render_budget_ns),
+            roundtrip_tick(
                 config,
+                &mut transport,
+                &mut receive,
+                source,
+                &mut scheduler,
+                &mut output,
+                now,
+                render_budget_ns,
+                true,
+                work,
             )?;
+        }
+        if let Some(s) = &mut scheduler {
+            work.append(&s.flush(), config)?;
         }
         for _ in 0..1000 {
             if stop.is_cancelled() {
@@ -900,6 +1036,8 @@ fn roundtrip(
     })();
     let encoded_frames = capture.statistics().encoded_frames;
     work.stats = json!({"capture":capture.statistics(), "receive":receive.statistics(), "transport":transport.statistics(), "simulated_clocks":config.clocks, "last_steady_source_clocks":work.last_source_clocks, "steady_render":work.render_totals, "render_totals_scope":"ordinary demand only; drain metric API unavailable",
+        "scheduler":scheduler.as_ref().map(|s|json!({"classification":"simulated","statistics":s.stats,"pending_frames":s.queued_frames(),
+            "method":"independently gated worker/consumer on rational 10 ms host ticks; arrivals continue; no catch-up; whole-block reject; synthetic EOF flush; not native callback or OS scheduling"})),
         "codec_payload":{"bytes":work.encoded_bytes,"packet_min_bytes":work.encoded_packet_min_bytes,"packet_max_bytes":work.encoded_packet_max_bytes,
         "observed_bitrate_bps":if encoded_frames == 0 {None} else {Some(work.encoded_bytes as f64 * 8.0 * f64::from(plan.capture_format.sample_rate_hz()) / encoded_frames as f64)},
         "method":"payload only over encoded media duration including EOF padding; VBR may differ from target; no transport headers"}});
@@ -959,6 +1097,7 @@ fn receive_recording(
                 let payload_present = packet.payload.is_some();
                 let outcome = match packet.payload {
                     Some(payload) => {
+                        let started = config.execution_profiling.then(Instant::now);
                         let outcome = receive.push_packet(EncodedPacket {
                             source: source.key,
                             epoch: source.epoch,
@@ -967,6 +1106,9 @@ fn receive_recording(
                             arrival_ns: packet.arrival_ns,
                             payload,
                         })?;
+                        if let Some(started) = started {
+                            work.profile.packet_admission.observe(ns_since(started));
+                        }
                         admitted += 1;
                         json!(outcome)
                     }
@@ -988,6 +1130,7 @@ fn receive_recording(
             let elapsed = work.receive_execution.record_budget(started, budget);
             let metrics = metrics?;
             work.render_totals.observe(&metrics);
+            work.profile.observe(&metrics);
             work.last_source_clocks = json!(receive.clock_metrics());
             work.append(&output, config)?;
             work.event(
@@ -1209,6 +1352,21 @@ pub(crate) fn run_bytes(
     if config.scenario == Scenario::FileRoundtrip {
         let receive = &work.stats["receive"];
         let transport = &work.stats["transport"];
+        if config.scheduler.enabled {
+            let s = &work.stats["scheduler"]["statistics"];
+            let n = |key: &str| s[key].as_u64().unwrap_or(0);
+            checks.push(Check { id: "output_queue_conservation".into(),
+                passed: n("produced_frames") == n("enqueued_frames") + n("output_overflow_frames")
+                    && n("enqueued_frames") == n("consumed_frames") + n("recovery_discarded_frames")
+                        + n("synthetic_eof_flushed_frames") + work.stats["scheduler"]["pending_frames"].as_u64().unwrap_or(0),
+                detail:"whole blocks produced = enqueued + rejected; enqueued = consumed + discarded + synthetic EOF flush + pending".into() });
+            checks.push(Check { id:"output_consumer_no_underrun".into(),
+                passed:n("output_underrun_frames") == 0,
+                detail:"ordinary virtual consumer demand only; injected worker stalls may intentionally fail this quality check".into() });
+            checks.push(Check { id:"output_queue_no_drop".into(),
+                passed:n("output_overflow_frames") == 0 && n("recovery_discarded_frames") == 0,
+                detail:"no rejected or discarded output frames; injected consumer stalls may intentionally fail this quality check".into() });
+        }
         checks.push(Check {
             id: "transport_accounting".into(),
             passed: transport["pending_copies"] == 0
@@ -1219,7 +1377,9 @@ pub(crate) fn run_bytes(
                         .map(|(dropped, delivered)| dropped + delivered),
             detail: "all produced originals/copies either intentionally dropped or delivered; no pending tail".into(),
         });
-        if !config.transport.is_impaired() {
+        if !config.transport.is_impaired()
+            && (!config.scheduler.enabled || config.scheduler.worker_pause.duration_ms == 0)
+        {
             checks.push(Check {
                 id: "lossless_virtual_transport".into(),
                 passed: receive["decode_errors"] == 0
@@ -1255,6 +1415,11 @@ pub(crate) fn run_bytes(
         output_signal: json!(signal),
         graph_statistics: work.stats.clone(),
         latency: json!({"capture_execution":work.capture_execution.value(), "receive_execution":work.receive_execution.value(),
+            "execution_profile":work.profile.value(),
+            "virtual_output_queue":{"classification":if config.scheduler.enabled {"simulated"} else {"not_covered"},
+                "max_consumed_age_ns":work.stats["scheduler"]["statistics"]["max_queued_age_ns"],
+                "capacity_frames":if config.scheduler.enabled {Some(config.scheduler.output_capacity_samples / usize::from(plan.output_format.channels()))} else {None},
+                "method":"consumed virtual-host time minus ring write time; excludes dropped/unconsumed data; no native presentation delay"},
             "capture_resampler":{"classification":if config.scenario == Scenario::ReceiveSimulation {"not_covered"} else {"estimated"}, "method":"production backend group delay", "clock":"capture_output", "frames":capture["resampler_delay_frames"]},
             "processor":{"classification":if config.scenario == Scenario::ReceiveSimulation {"not_covered"} else if config.processing.enabled {"unknown"} else {"bypassed"}, "frames":capture["processing_delay_frames"], "reason":if config.scenario == Scenario::ReceiveSimulation {"receiver-only input"} else if config.processing.enabled {"Sonora does not expose algorithmic delay"} else {"bypassed"}},
             "encoder":{"classification":if config.scenario == Scenario::FileRoundtrip {"estimated"} else {"not_covered"}, "clock":"capture_output", "frames":capture["encoder_lookahead_frames"]},

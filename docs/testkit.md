@@ -372,3 +372,34 @@ payload emits `partial-packet-replay` and check-failure exit 1, never healthy me
 A no-Opus CLI successfully analyzes that bundle. This is offline model evidence;
 live client packet export, multistream/lifecycle replay and hardware E2E remain
 unimplemented. See `packet-replay.md` for exact supported boundaries and commands.
+
+The fifth slice adds independently gated worker/consumer pauses around the
+roundtrip production graph and bounded output SPSC, optional substage timing and
+constant-memory timing percentiles. Clean scheduling/profiling preserves output
+PCM; faults retain queue conservation, consumer sample/time ranges, recovery and
+quality-check failures rather than treating every completed run as healthy audio.
+See `scheduler-profiling.md` for configuration, interpretation and limitations.
+
+Local Release `mix-stage-profile` evidence under `target/validation/a5-20261003/`
+retains byte-identical WAVs for all seven previous mix-sweep cases. For 64 voice
+sources, mean source processing was 8.05 ms of the 8.62 ms ordinary worker mean;
+bus mixing was 0.01 ms, master 0.19 ms, signal analysis 0.21 ms and PCM admission
+0.15 ms. These are attributed regions, not a complete additive CPU decomposition.
+The worker maximum was 12.40 ms with 32/300 calls over 10 ms; 32 sources had a
+6.42 ms maximum and no observed overruns. Target-machine short-run observations
+include profiling overhead and OS noise, not a hardware or 64-source acceptance.
+Optimization should first investigate source DSP, not reduce audio-quality
+settings or increase queue capacity to mask the overruns.
+
+Release example faults completed with expected quality-check exit 1: the 80 ms
+worker pause produced 3840 underrun frames and one explicit clock recovery, while
+the independent 80 ms consumer pause produced 1920 rejected frames plus 1920
+discarded backlog frames and no receiver recovery/queue underrun. Both retained
+valid complete diagnostic bundles, trace and output WAV without native devices.
+
+Validation passes 125 workspace unit/integration tests plus one doctest, and
+30 headless unit/integration tests plus one doctest. Both strict Clippy modes,
+format checks, warning-as-error Rustdoc and Release build pass. Deterministic
+regressions include EOF with delayed packets at 10/20 ms ptime, independent
+sample clocks, trace truncation, queue conservation, cancellation, explicit
+recovery without residual drift and waveform-identical replay.

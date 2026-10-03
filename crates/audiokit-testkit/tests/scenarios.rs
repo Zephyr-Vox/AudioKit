@@ -62,6 +62,271 @@ fn bypass() -> RunConfig {
 }
 
 #[test]
+fn profiling_is_pcm_neutral_and_histograms_survive_trace_truncation() {
+    let fixture = Fixture::new();
+    let input = fixture.input(44_100, 2, 4410);
+    let mut config = RunConfig::for_scenario(Scenario::MixStress);
+    config.mix_stress.sources = 4;
+    let plain = fixture.path("plain");
+    run(&config, &input, &plain, &Cancellation::default(), |_| {}).unwrap();
+    config.execution_profiling = true;
+    config.max_trace_events = 1;
+    let profiled = fixture.path("profiled");
+    let d = run(&config, &input, &profiled, &Cancellation::default(), |_| {}).unwrap();
+    assert_eq!(
+        fs::read(plain.join("processed.wav")).unwrap(),
+        fs::read(profiled.join("processed.wav")).unwrap()
+    );
+    assert!(d.trace_events_dropped > 0);
+    let latency = &d.latency;
+    assert_eq!(
+        latency["execution_profile"]["source_processing"]["calls"],
+        10
+    );
+    assert_eq!(latency["receive_execution"]["ordinary"]["calls"], 10);
+    assert!(
+        latency["receive_execution"]["ordinary"]["p99_ns"]
+            .as_u64()
+            .is_some()
+    );
+    assert!(
+        latency["receive_execution"]["unbudgeted"]["calls"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(latency["execution_profile"]["decode"]["p99_ns"].is_null());
+    assert!(analyze(&profiled).is_ok());
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn scheduler_clean_is_bit_exact_and_pauses_have_independent_evidence() {
+    use audiokit_testkit::PauseConfig;
+    let fixture = Fixture::new();
+    let input = fixture.input(48_000, 1, 96_000);
+    let mut c = bypass();
+    c.scenario = Scenario::FileRoundtrip;
+    c.retain_input = true;
+    c.receive.clock_window_ms = 1000;
+    let plain = fixture.path("plain");
+    run(&c, &input, &plain, &Cancellation::default(), |_| {}).unwrap();
+    c.scheduler.enabled = true;
+    c.execution_profiling = true;
+    let clean = fixture.path("clean");
+    let d = run(&c, &input, &clean, &Cancellation::default(), |_| {}).unwrap();
+    assert_eq!(
+        fs::read(plain.join("processed.wav")).unwrap(),
+        fs::read(clean.join("processed.wav")).unwrap()
+    );
+    assert!(d.checks.iter().all(|v| v.passed), "{:?}", d.checks);
+    assert_eq!(d.latency["execution_profile"]["decode"]["calls"], 200);
+    assert!(
+        d.latency["execution_profile"]["pcm_admission"]["calls"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let pause = PauseConfig {
+        start_ms: 400,
+        duration_ms: 80,
+    };
+    c.scheduler.output_pause = pause;
+    let d = run(
+        &c,
+        &input,
+        &fixture.path("output"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    let s = &d.graph_statistics["scheduler"]["statistics"];
+    assert_eq!(s["worker_paused_ticks"], 0);
+    assert_eq!(s["output_paused_ticks"], 8);
+    assert_eq!(s["output_underrun_frames"], 0);
+    assert_eq!(s["output_overflow_frames"], 1920);
+    assert_eq!(s["recovery_discarded_frames"], 1920);
+    assert_eq!(d.graph_statistics["receive"]["clock_recoveries"], 0);
+    assert!(
+        !d.checks
+            .iter()
+            .find(|v| v.id == "output_queue_no_drop")
+            .unwrap()
+            .passed
+    );
+    assert!(
+        d.checks
+            .iter()
+            .filter(|v| v.id != "output_queue_no_drop")
+            .all(|v| v.passed),
+        "{:?}",
+        d.checks
+    );
+    c.scheduler.output_pause = Default::default();
+    c.scheduler.worker_pause = pause;
+    let worker = fixture.path("worker");
+    let d = run(&c, &input, &worker, &Cancellation::default(), |_| {}).unwrap();
+    let s = &d.graph_statistics["scheduler"]["statistics"];
+    assert_eq!(s["worker_paused_ticks"], 8);
+    assert_eq!(s["output_paused_ticks"], 0);
+    assert_eq!(s["output_underrun_frames"], 3840);
+    assert_eq!(s["output_overflow_frames"], 0);
+    assert_eq!(
+        s["first_healthy_consumption_after_worker_resume_ns"],
+        480_000_000_u64
+    );
+    assert_eq!(d.graph_statistics["receive"]["clock_recoveries"], 1);
+    assert_eq!(d.graph_statistics["transport"]["pending_copies"], 0);
+    let clocks = d.graph_statistics["last_steady_source_clocks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(clocks[0]["applied_correction_ppm"], 0);
+    assert_eq!(clocks[0]["inferred_device_drift_ppm"], 0.0);
+    assert_eq!(clocks[0]["inferred_source_drift_ppm"], 0.0);
+    assert!(
+        d.checks
+            .iter()
+            .find(|v| v.id == "output_queue_conservation")
+            .unwrap()
+            .passed
+    );
+    assert!(
+        !d.checks
+            .iter()
+            .find(|v| v.id == "output_consumer_no_underrun")
+            .unwrap()
+            .passed
+    );
+    let replayed = fixture.path("replayed");
+    replay(&worker, None, &replayed, &Cancellation::default(), |_| {}).unwrap();
+    assert_eq!(
+        fs::read(worker.join("processed.wav")).unwrap(),
+        fs::read(replayed.join("processed.wav")).unwrap()
+    );
+    let analysis = analyze(&worker).unwrap();
+    assert!(
+        analysis
+            .evidence
+            .iter()
+            .any(|e| e.flags.iter().any(|f| f == "output_queue_underrun") && e.frames == 480)
+    );
+    assert!(
+        analysis
+            .evidence
+            .iter()
+            .any(|e| e.flags.iter().any(|f| f == "worker_clock_recovery"))
+    );
+    c.scheduler.worker_pause = Default::default();
+    c.transport.stall_start_ms = 400;
+    c.transport.stall_duration_ms = 200;
+    let d = run(
+        &c,
+        &input,
+        &fixture.path("network"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    let s = &d.graph_statistics["scheduler"]["statistics"];
+    assert_eq!(s["worker_paused_ticks"], 0);
+    assert_eq!(s["output_paused_ticks"], 0);
+    assert_eq!(s["output_underrun_frames"], 0);
+    assert_eq!(d.graph_statistics["receive"]["clock_recoveries"], 0);
+    assert!(
+        d.graph_statistics["receive"]["concealed_packets"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        d.graph_statistics["transport"]["stalled_packets"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn scheduler_does_not_invent_plc_at_delayed_network_eof() {
+    for ptime in [PacketDuration::Ms10, PacketDuration::Ms20] {
+        let fixture = Fixture::new();
+        let input = fixture.input(44_100, 2, 4801);
+        let mut c = bypass();
+        c.scenario = Scenario::FileRoundtrip;
+        c.ptime = ptime;
+        c.transport.delay_ms = 17;
+        c.clocks.capture_rate_ppm = 400;
+        c.clocks.render_rate_ppm = -100;
+        let plain = fixture.path("plain");
+        let d = run(&c, &input, &plain, &Cancellation::default(), |_| {}).unwrap();
+        c.scheduler.enabled = true;
+        let queued = fixture.path("queued");
+        let q = run(&c, &input, &queued, &Cancellation::default(), |_| {}).unwrap();
+        assert_eq!(
+            fs::read(plain.join("processed.wav")).unwrap(),
+            fs::read(queued.join("processed.wav")).unwrap()
+        );
+        assert_eq!(
+            d.graph_statistics["receive"]["concealed_packets"],
+            q.graph_statistics["receive"]["concealed_packets"]
+        );
+        assert_eq!(
+            q.graph_statistics["scheduler"]["statistics"]["output_underrun_frames"],
+            0
+        );
+    }
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn scheduler_eof_pause_finishes_bounded_and_cancellation_keeps_partial_bundle() {
+    use audiokit_testkit::PauseConfig;
+    let fixture = Fixture::new();
+    let input = fixture.input(48_000, 1, 4800);
+    let mut c = bypass();
+    c.scenario = Scenario::FileRoundtrip;
+    c.scheduler.enabled = true;
+    c.scheduler.worker_pause = PauseConfig {
+        start_ms: 80,
+        duration_ms: 100,
+    };
+    c.scheduler.output_pause = PauseConfig {
+        start_ms: 80,
+        duration_ms: 100,
+    };
+    let d = run(
+        &c,
+        &input,
+        &fixture.path("eof"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        d.graph_statistics["scheduler"]["statistics"]["worker_resume_events"],
+        1
+    );
+    assert_eq!(d.graph_statistics["scheduler"]["pending_frames"], 0);
+    assert!(
+        d.checks
+            .iter()
+            .find(|v| v.id == "output_queue_conservation")
+            .unwrap()
+            .passed
+    );
+    let stop = Cancellation::default();
+    assert!(matches!(
+        run(&c, &input, &fixture.path("cancelled"), &stop, |_| stop
+            .cancel()),
+        Err(Error::Cancelled)
+    ));
+    let a = analyze(&fixture.path("cancelled")).unwrap();
+    assert!(a.integrity_verified);
+    assert!(!a.recorded_checks_passed);
+}
+
+#[test]
 fn mix_stress_covers_source_counts_protection_and_codec_free_plan() {
     for sources in [1, 2, 4, 8, 16, 32, 64] {
         let fixture = Fixture::new();

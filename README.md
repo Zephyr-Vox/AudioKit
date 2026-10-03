@@ -81,6 +81,8 @@ diagnostic bundle export, integrity checks, analysis, signal replay, determinist
 virtual forwarding faults, bounded serial sweeps, correlated mix stress and
 independent virtual clocks and single-source external Opus packet replay.
 See `docs/packet-replay.md` for recording consent, completeness and schedule limits.
+See `docs/scheduler-profiling.md` for independent worker/consumer pauses, bounded
+output-queue evidence, recovery policy and opt-in production substage profiling.
 Slint, native device scenarios and the server host bridge are still pending.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification

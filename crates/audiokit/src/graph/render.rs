@@ -134,6 +134,28 @@ pub struct SourceRenderMetrics {
     pub rate_eof_padding_frames: u64,
 }
 
+/// Optional, non-overlapping worker substage timers. Decoder/admission timers are
+/// supplied by ReceiveGraph and are outside render's execution_ns.
+/// Timer overhead is included, so these observations are not a CPU deadline guarantee.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RenderExecutionProfile {
+    /// FIFO extraction, gain/activity, source protection and channel expansion, summed across sources.
+    pub source_processing_ns: u64,
+    /// Bus accumulation and final normalization/summation.
+    pub mix_ns: u64,
+    /// Master protection and copying its result.
+    pub master_limiter_ns: u64,
+    /// Pre/post-master signal analysis.
+    pub signal_analysis_ns: u64,
+    /// Receiver decoder calls, including FEC/PLC; None for render-only demand.
+    pub decode_ns: Option<u64>,
+    /// Receiver PCM admission/resampling/rate correction; None for render-only demand.
+    pub pcm_admission_ns: Option<u64>,
+}
+fn elapsed_ns(start: std::time::Instant) -> u64 {
+    start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
 /// One render call's common cursor and stage measurements.
 #[derive(Debug, Clone, Serialize)]
 pub struct RenderMetrics {
@@ -153,6 +175,8 @@ pub struct RenderMetrics {
     pub master_limiter: LimiterFrameMetrics,
     /// Measured worker execution only; excludes device buffers, transport and artifact I/O.
     pub execution_ns: u64,
+    /// None unless the worker explicitly enables detailed timing; no PCM/state changes.
+    pub execution_profile: Option<RenderExecutionProfile>,
     /// Per-source gain/activity/queue/protection trace.
     pub sources: Vec<SourceRenderMetrics>,
 }
@@ -186,6 +210,7 @@ pub struct RenderGraph {
     post: AudioSignalAnalyzer,
     state: GraphState,
     drain_remaining: u64,
+    execution_profiling: bool,
 }
 fn processing(error: impl std::fmt::Display) -> AudioError {
     AudioError::Processing(error.to_string())
@@ -211,11 +236,17 @@ impl RenderGraph {
             post: AudioSignalAnalyzer::new(AudioDiagnosticsConfig::default()),
             state: GraphState::Running,
             drain_remaining: 0,
+            execution_profiling: false,
         })
     }
     /// Returns the validated shared policy, including both limiter delays.
     pub fn config(&self) -> RenderGraphConfig {
         self.config
+    }
+    /// Enables worker-side substage timers. Disabled by default to avoid per-source clock reads.
+    /// Changing this observation policy does not reset histories or alter PCM.
+    pub fn set_execution_profiling(&mut self, enabled: bool) {
+        self.execution_profiling = enabled;
     }
     /// Returns the cursor advanced exclusively by actual render demand.
     pub fn sample_position(&self) -> u64 {
@@ -461,7 +492,11 @@ impl RenderGraph {
         let mut active_voice = 0;
         let mut active_desktop = 0;
         let mut metrics = Vec::with_capacity(self.sources.len());
+        let mut profile = self
+            .execution_profiling
+            .then(RenderExecutionProfile::default);
         for source in self.sources.values_mut() {
+            let source_started = self.execution_profiling.then(std::time::Instant::now);
             let source_channels = source.registration.format.channels();
             let source_samples = frames as usize * usize::from(source_channels);
             let available = source.fifo.len().min(source_samples);
@@ -495,6 +530,10 @@ impl RenderGraph {
             )?;
             let limited =
                 crate::channel::map_channels(source_format, self.config.format, &limited)?;
+            if let (Some(p), Some(start)) = (&mut profile, source_started) {
+                p.source_processing_ns = p.source_processing_ns.saturating_add(elapsed_ns(start));
+            }
+            let mix_started = self.execution_profiling.then(std::time::Instant::now);
             let bus = match source.registration.kind {
                 StreamKind::Voice => {
                     active_voice += usize::from(active);
@@ -508,6 +547,9 @@ impl RenderGraph {
             };
             for (mixed, sample) in bus.iter_mut().zip(limited) {
                 *mixed += sample;
+            }
+            if let (Some(p), Some(start)) = (&mut profile, mix_started) {
+                p.mix_ns = p.mix_ns.saturating_add(elapsed_ns(start));
             }
             let db = source.activity.envelope_dbfs();
             metrics.push(SourceRenderMetrics {
@@ -530,6 +572,7 @@ impl RenderGraph {
             });
             source.started |= available > 0;
         }
+        let mix_started = self.execution_profiling.then(std::time::Instant::now);
         let alpha = 1.0
             - (-1000.0
                 / self.config.format.sample_rate_hz() as f32
@@ -547,6 +590,10 @@ impl RenderGraph {
                     + other[index];
             }
         }
+        if let (Some(p), Some(start)) = (&mut profile, mix_started) {
+            p.mix_ns = p.mix_ns.saturating_add(elapsed_ns(start));
+        }
+        let analysis_started = self.execution_profiling.then(std::time::Instant::now);
         let pre_master = self
             .pre
             .observe_f32_frame(
@@ -555,11 +602,19 @@ impl RenderGraph {
                 self.config.format.channels(),
             )
             .map_err(processing)?;
+        if let (Some(p), Some(start)) = (&mut profile, analysis_started) {
+            p.signal_analysis_ns = elapsed_ns(start);
+        }
+        let master_started = self.execution_profiling.then(std::time::Instant::now);
         let (limited, master_limiter) = self
             .master
             .process_interleaved(output)
             .map_err(processing)?;
         output.copy_from_slice(&limited);
+        if let (Some(p), Some(start)) = (&mut profile, master_started) {
+            p.master_limiter_ns = elapsed_ns(start);
+        }
+        let analysis_started = self.execution_profiling.then(std::time::Instant::now);
         let post_master = self
             .post
             .observe_f32_frame(
@@ -568,6 +623,9 @@ impl RenderGraph {
                 self.config.format.channels(),
             )
             .map_err(processing)?;
+        if let (Some(p), Some(start)) = (&mut profile, analysis_started) {
+            p.signal_analysis_ns = p.signal_analysis_ns.saturating_add(elapsed_ns(start));
+        }
         let result = RenderMetrics {
             sample_position: self.cursor,
             frames,
@@ -577,6 +635,7 @@ impl RenderGraph {
             post_master,
             master_limiter,
             execution_ns: started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+            execution_profile: profile,
             sources: metrics,
         };
         self.cursor = end;

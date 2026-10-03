@@ -1,0 +1,8 @@
+{
+  "scenario": "mix-stress",
+  "processing": { "enabled": false },
+  "execution_profiling": true,
+  "max_pcm_samples": 500000,
+  "mix_stress": { "sources": 64, "max_total_source_frames": 10000000 },
+  "receive": { "render": { "max_sources": 64 } }
+}
