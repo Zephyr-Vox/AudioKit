@@ -52,6 +52,25 @@ sources on this machine; 96 kHz needs a smaller host-configured budget. Source
 admission is not proof of a machine's realtime CPU capability. Allocated worker
 buffers and attack-window scans must never run in native sample callbacks.
 
+Per-slot linked sample peaks and target gains are cached. With ring length
+`N = lookahead_frames + 1`, each ingress frame changes raw slot `cursor - 1`
+(wrapped) and reconstructed slot `raw_slot - 64` (wrapped). Both targets are
+refreshed after their respective writes; the other slots retain exactly the
+original target. The raw write must include that slot's existing reconstructed
+peak, even when it belongs to earlier input. These slots are distinct because
+`N >= 65`. A reset clears peaks to zero and targets to unity; reconfiguration
+rebuilds all state at the explicit stream boundary.
+
+The attack window is traversed as tail/head contiguous slices, in the same
+distance order as the original circular scan. Every peak still imposes its own
+deadline `gain + (target - gain) / distance` for positive distance, or immediate
+target gain at distance zero; a single minimum and its distance would miss nearer
+peaks. No reciprocals, gain equations, FIR coefficients or
+quality parameters were changed. Cache memory is `8 * N` bytes per limiter,
+independent of channel count (1,160 bytes by default; at most 30,728 bytes).
+See `limiter-cache-optimization.md` for bitwise reference tests and Release CPU
+evidence. Production admission remains 32, not a claim of 64-source realtime.
+
 The 2026-10-02 release probe used a Ryzen 9 7945HX (16 cores/32 logical CPUs),
 Windows x86_64 and Rust 1.98.1. Each row warmed 16 blocks, then measured 100 blocks
 with mono 48 kHz inputs and stereo output. This is a short worker throughput probe,

@@ -412,3 +412,12 @@ activity, limiter or tail histories. `source-dsp-diagnosis.md` records three
 Release repeats with disabled-timing controls: source limiting dominates, and
 64-source realtime performance remains unaccepted. This diagnostic slice does
 not optimize or alter the accepted DSP algorithms.
+
+The subsequent equivalent limiter target-cache slice passes 129 workspace
+unit/integration tests plus one doctest, and 30 headless unit/integration tests
+plus one doctest. A frozen scalar scan compares PCM/gain bits, counters and cursor
+across boundary formats, block sizes, wraps, reset/reconfiguration and complete
+tails. The independent reconstruction corpus remains passing. All 16 optimized
+Release stress WAVs match the pre-change output exactly; 64-desktop calls still
+sometimes exceed 10 ms, so production admission remains 32. See
+`limiter-cache-optimization.md` for measurements, memory cost and reproduction.

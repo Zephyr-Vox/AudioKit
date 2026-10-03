@@ -85,6 +85,8 @@ See `docs/scheduler-profiling.md` for independent worker/consumer pauses, bounde
 output-queue evidence, recovery policy and opt-in production substage profiling.
 See `docs/source-dsp-diagnosis.md` for the measured 32/64-source limiter bottleneck,
 mono/stereo controls and the limits of the CPU attribution.
+See `docs/limiter-cache-optimization.md` for the behavior-preserving target cache,
+bitwise reference coverage and before/after worker CPU results.
 Slint, native device scenarios and the server host bridge are still pending.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification

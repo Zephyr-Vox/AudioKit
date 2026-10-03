@@ -156,6 +156,11 @@ pub struct LimiterFrameMetrics {
 /// detector over the delayed window, and schedules gain reduction before peaks
 /// reach the output. A final sample ceiling safeguard protects against
 /// attack-time and floating-point edge cases.
+///
+/// Linked sample peaks and target gains are cached per delayed frame. They add
+/// eight bytes of array storage per lookahead-ring frame (1,160 bytes at 48 kHz/
+/// 3 ms), allocated when constructed, cloned or reconfigured. Processing still
+/// allocates its returned block and must run on a worker, not a native callback.
 #[derive(Debug, Clone)]
 pub struct MasterLimiter {
     sample_rate_hz: u32,
@@ -168,6 +173,8 @@ pub struct MasterLimiter {
     release_coefficient: f32,
     delay: Vec<f32>,
     true_peak_delay: Vec<f32>,
+    sample_peaks: Vec<f32>,
+    targets: Vec<f32>,
     true_peak_estimator: TruePeakEstimator,
     cursor_frame: usize,
     gain: f32,
@@ -205,6 +212,8 @@ impl MasterLimiter {
             release_coefficient,
             delay: vec![0.0; delay_frames * usize::from(channels)],
             true_peak_delay: vec![0.0; delay_frames],
+            sample_peaks: vec![0.0; delay_frames],
+            targets: vec![1.0; delay_frames],
             true_peak_estimator: TruePeakEstimator::new(usize::from(channels)),
             cursor_frame: 0,
             gain: 1.0,
@@ -234,9 +243,24 @@ impl MasterLimiter {
     pub fn reset(&mut self) {
         self.delay.fill(0.0);
         self.true_peak_delay.fill(0.0);
+        self.sample_peaks.fill(0.0);
+        self.targets.fill(1.0);
         self.true_peak_estimator.reset(self.channels);
         self.cursor_frame = 0;
         self.gain = 1.0;
+    }
+
+    /// Refreshes a slot after either its raw samples or reconstructed peak changes.
+    /// All other slot targets remain valid until their own next write.
+    fn refresh_target(&mut self, frame: usize) {
+        let peak = self.sample_peaks[frame].max(self.true_peak_delay[frame]);
+        self.targets[frame] = if peak > self.detector_ceiling {
+            // Preserve f32 order and a few ULPs of margin: division/multiplication
+            // rounding must not turn an exact target into a safety clamp.
+            (self.detector_ceiling * (1.0 - 4.0 * f32::EPSILON)) / peak
+        } else {
+            1.0
+        };
     }
 
     /// Processes one interleaved block and returns an equally sized delayed block.
@@ -262,9 +286,18 @@ impl MasterLimiter {
         };
 
         for input_frame in input.chunks_exact(self.channels) {
-            let write_frame = (self.cursor_frame + self.lookahead_frames) % delay_frames;
+            // Ring length is lookahead + 1, so ingress always writes behind the cursor.
+            let write_frame = if self.cursor_frame == 0 {
+                delay_frames - 1
+            } else {
+                self.cursor_frame - 1
+            };
             let write_start = write_frame * self.channels;
             self.delay[write_start..write_start + self.channels].copy_from_slice(input_frame);
+            self.sample_peaks[write_frame] = input_frame
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+            self.refresh_target(write_frame);
             let true_peak =
                 input_frame
                     .iter()
@@ -279,26 +312,23 @@ impl MasterLimiter {
                     }) as f32;
             // Fractional phases reconstruct positions 63..63.75 frames behind ingress.
             // Attribute their maximum to the nearest delayed frame before it is emitted.
-            let true_peak_frame =
-                (write_frame + delay_frames - TRUE_PEAK_GROUP_DELAY_FRAMES) % delay_frames;
+            let true_peak_frame = if write_frame >= TRUE_PEAK_GROUP_DELAY_FRAMES {
+                write_frame - TRUE_PEAK_GROUP_DELAY_FRAMES
+            } else {
+                write_frame + delay_frames - TRUE_PEAK_GROUP_DELAY_FRAMES
+            };
             self.true_peak_delay[true_peak_frame] = true_peak;
+            // The ring is at least 65 frames: these two writes touch distinct slots.
+            // Refresh both, including the old reconstructed peak at the raw write slot.
+            self.refresh_target(true_peak_frame);
 
             let mut upcoming_target = 1.0_f32;
             let mut scheduled_gain = self.gain;
-            for distance in 0..=self.attack_frames {
-                let frame_index = (self.cursor_frame + distance) % delay_frames;
-                let start = frame_index * self.channels;
-                let sample_peak = self.delay[start..start + self.channels]
-                    .iter()
-                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-                let peak = sample_peak.max(self.true_peak_delay[frame_index]);
-                let target = if peak > self.detector_ceiling {
-                    // Keep a few ULPs below the ceiling so f32 division and
-                    // multiplication cannot turn an exact target into a clamp.
-                    (self.detector_ceiling * (1.0 - 4.0 * f32::EPSILON)) / peak
-                } else {
-                    1.0
-                };
+            // Two contiguous slices retain distance order without per-candidate modulo.
+            let tail_len = (delay_frames - self.cursor_frame).min(self.attack_frames + 1);
+            let tail = &self.targets[self.cursor_frame..self.cursor_frame + tail_len];
+            let head = &self.targets[..self.attack_frames + 1 - tail_len];
+            for (distance, &target) in tail.iter().chain(head.iter()).enumerate() {
                 upcoming_target = upcoming_target.min(target);
                 if target < self.gain {
                     // Each peak imposes its own deadline. Combining only the
@@ -343,12 +373,19 @@ impl MasterLimiter {
                 }
                 output.push(sample);
             }
-            self.cursor_frame = (self.cursor_frame + 1) % delay_frames;
+            self.cursor_frame += 1;
+            if self.cursor_frame == delay_frames {
+                self.cursor_frame = 0;
+            }
         }
 
         Ok((output, metrics))
     }
 }
+
+#[cfg(test)]
+#[path = "limiter/reference_tests.rs"]
+mod reference_tests;
 
 #[cfg(test)]
 mod tests {

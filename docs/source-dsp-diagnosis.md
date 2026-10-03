@@ -1,5 +1,9 @@
 # Source DSP Diagnosis (2026-10-03)
 
+This report records the pre-optimization diagnosis. The subsequent equivalent
+target-cache change and new measurements are in `limiter-cache-optimization.md`;
+historical timings below are not measurements of the optimized implementation.
+
 ## Scope and Reproduction
 
 This is a **render worker CPU diagnosis**, not a diagnosis of microphone noise,
