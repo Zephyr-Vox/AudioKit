@@ -134,13 +134,32 @@ pub struct SourceRenderMetrics {
     pub rate_eof_padding_frames: u64,
 }
 
-/// Optional, non-overlapping worker substage timers. Decoder/admission timers are
+/// Disjoint children of source_processing_ns, summed across sources for one demand.
+/// Allocation and validation inside each region are included; allocator cost is not isolated.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SourceExecutionProfile {
+    /// PCM allocation/zero fill and decoded FIFO extraction.
+    pub queue_read_ns: u64,
+    /// Production gain ramp, including configuration validation.
+    pub gain_ns: u64,
+    /// Energy detector and active/mute decision.
+    pub activity_ns: u64,
+    /// Complete source limiter call, including output allocation and detector/envelope work.
+    pub limiter_ns: u64,
+    /// Render-rate format construction and channel mapping/allocation.
+    pub channel_map_ns: u64,
+}
+
+/// Optional worker substage timers. Decoder/admission timers are
 /// supplied by ReceiveGraph and are outside render's execution_ns.
+/// Source child timers are nested: never add them again to source_processing_ns.
 /// Timer overhead is included, so these observations are not a CPU deadline guarantee.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RenderExecutionProfile {
     /// FIFO extraction, gain/activity, source protection and channel expansion, summed across sources.
     pub source_processing_ns: u64,
+    /// Disjoint subregions nested inside source_processing_ns, not extra execution time.
+    pub source_stages: SourceExecutionProfile,
     /// Bus accumulation and final normalization/summation.
     pub mix_ns: u64,
     /// Master protection and copying its result.
@@ -497,6 +516,7 @@ impl RenderGraph {
             .then(RenderExecutionProfile::default);
         for source in self.sources.values_mut() {
             let source_started = self.execution_profiling.then(std::time::Instant::now);
+            let queue_started = self.execution_profiling.then(std::time::Instant::now);
             let source_channels = source.registration.format.channels();
             let source_samples = frames as usize * usize::from(source_channels);
             let available = source.fifo.len().min(source_samples);
@@ -504,6 +524,13 @@ impl RenderGraph {
             for sample in &mut pcm[..available] {
                 *sample = source.fifo.pop_front().expect("available source PCM");
             }
+            if let (Some(p), Some(start)) = (&mut profile, queue_started) {
+                p.source_stages.queue_read_ns = p
+                    .source_stages
+                    .queue_read_ns
+                    .saturating_add(elapsed_ns(start));
+            }
+            let gain_started = self.execution_profiling.then(std::time::Instant::now);
             source
                 .gain
                 .apply_interleaved(
@@ -514,15 +541,31 @@ impl RenderGraph {
                     self.config.gain,
                 )
                 .map_err(processing)?;
+            if let (Some(p), Some(start)) = (&mut profile, gain_started) {
+                p.source_stages.gain_ns = p.source_stages.gain_ns.saturating_add(elapsed_ns(start));
+            }
+            let activity_started = self.execution_profiling.then(std::time::Instant::now);
             let active = source.activity.observe(
                 &pcm,
                 source_channels,
                 self.config.format.sample_rate_hz(),
             )? && (source.target_gain > 0.0 || source.gain.current_gain() > 0.0);
+            if let (Some(p), Some(start)) = (&mut profile, activity_started) {
+                p.source_stages.activity_ns = p
+                    .source_stages
+                    .activity_ns
+                    .saturating_add(elapsed_ns(start));
+            }
+            let limiter_started = self.execution_profiling.then(std::time::Instant::now);
             let (limited, limiter) = source
                 .limiter
                 .process_interleaved(&pcm)
                 .map_err(processing)?;
+            if let (Some(p), Some(start)) = (&mut profile, limiter_started) {
+                p.source_stages.limiter_ns =
+                    p.source_stages.limiter_ns.saturating_add(elapsed_ns(start));
+            }
+            let channel_started = self.execution_profiling.then(std::time::Instant::now);
             // Mono speech stays mono through gain/activity/protection. Expand only at the bus.
             let source_format = AudioFormat::new(
                 self.config.format.sample_rate_hz(),
@@ -531,6 +574,12 @@ impl RenderGraph {
             let limited =
                 crate::channel::map_channels(source_format, self.config.format, &limited)?;
             if let (Some(p), Some(start)) = (&mut profile, source_started) {
+                if let Some(channel_start) = channel_started {
+                    p.source_stages.channel_map_ns = p
+                        .source_stages
+                        .channel_map_ns
+                        .saturating_add(elapsed_ns(channel_start));
+                }
                 p.source_processing_ns = p.source_processing_ns.saturating_add(elapsed_ns(start));
             }
             let mix_started = self.execution_profiling.then(std::time::Instant::now);

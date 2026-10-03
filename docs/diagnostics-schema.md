@@ -108,6 +108,10 @@ have null total/max, not a fabricated zero. Timing histograms separate ordinary
 budgeted calls and unbudgeted finish/drain calls. Their p50/p95/p99 are fixed-bin
 upper bounds, not exact samples (see `scheduler-profiling.md`). Optional production
 substage timings live in `latency.execution_profile`; disabled sets stay unavailable.
+Its `source_stages` histograms are nested inside source-processing, not additive
+parallel regions. They cover queue read/allocation, gain, activity, the complete
+source limiter and channel mapping. Per-call trace children are nested under
+`execution_profile.source_stages`, with integer `_ns` fields.
 CPU durations exclude trace serialization, artifact I/O and
 post-run analysis. Device/server and aligned E2E delay are unknown. No sum is
 reported that double-counts parallel work, buffering or codec/group delays.

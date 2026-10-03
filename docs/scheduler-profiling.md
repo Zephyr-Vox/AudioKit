@@ -81,6 +81,15 @@ metric bookkeeping are not completely attributed by substage timers.
 Clock reads and instrumentation overhead are included. Profiling cannot change
 PCM parameters, histories or default source admission (32).
 
+`source_stages` splits the source-processing parent into queue allocation/read,
+gain, activity, complete source limiter and channel mapping. Trace uses integer
+nanoseconds; aggregate diagnostics use the same bounded histograms as other
+regions. All child values are summed across sources for each ordinary demand and
+are already included in `source_processing_ns`; never add parent and children
+together. They include allocations within each region, not an allocator-only
+measurement. See `source-dsp-diagnosis.md` for 32/64 voice/desktop repeats and
+disabled-timing controls; source limiter internals are not individually timed.
+
 `latency.execution_profile` summarizes ordinary stages (final packet admission is
 included; drain DSP is not). `capture_execution`/`receive_execution` each separate
 `ordinary` budgeted calls from `unbudgeted` calls, including finish/drain. Capture

@@ -114,6 +114,11 @@ struct ProfileTotals {
     pcm_admission: crate::timing::Histogram,
     decode: crate::timing::Histogram,
     source_processing: crate::timing::Histogram,
+    source_queue_read: crate::timing::Histogram,
+    source_gain: crate::timing::Histogram,
+    source_activity: crate::timing::Histogram,
+    source_limiter: crate::timing::Histogram,
+    source_channel_map: crate::timing::Histogram,
     mix: crate::timing::Histogram,
     master_limiter: crate::timing::Histogram,
     signal_analysis: crate::timing::Histogram,
@@ -128,6 +133,13 @@ impl ProfileTotals {
                 self.pcm_admission.observe(ns);
             }
             self.source_processing.observe(p.source_processing_ns);
+            self.source_queue_read
+                .observe(p.source_stages.queue_read_ns);
+            self.source_gain.observe(p.source_stages.gain_ns);
+            self.source_activity.observe(p.source_stages.activity_ns);
+            self.source_limiter.observe(p.source_stages.limiter_ns);
+            self.source_channel_map
+                .observe(p.source_stages.channel_map_ns);
             self.mix.observe(p.mix_ns);
             self.master_limiter.observe(p.master_limiter_ns);
             self.signal_analysis.observe(p.signal_analysis_ns);
@@ -137,6 +149,10 @@ impl ProfileTotals {
         json!({"scope":"ordinary worker calls only, except packet admission includes final arrivals; no drain DSP; source processing/mix summed across sources per call; packet admission per packet; includes clock-read overhead; stages do not sum to end-to-end latency",
             "packet_admission":self.packet_admission.value(),"pcm_admission":self.pcm_admission.value(),
             "decode":self.decode.value(),"source_processing":self.source_processing.value(),
+            "source_stages":{"scope":"children already included in source_processing; summed across sources per ordinary demand; allocation inside each region is included, not separately attributed; includes clock-read overhead",
+                "queue_read":self.source_queue_read.value(),"gain":self.source_gain.value(),
+                "activity":self.source_activity.value(),"limiter":self.source_limiter.value(),
+                "channel_map":self.source_channel_map.value()},
             "mix":self.mix.value(),"master_limiter":self.master_limiter.value(),"signal_analysis":self.signal_analysis.value()})
     }
 }

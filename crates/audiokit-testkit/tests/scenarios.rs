@@ -65,38 +65,58 @@ fn bypass() -> RunConfig {
 fn profiling_is_pcm_neutral_and_histograms_survive_trace_truncation() {
     let fixture = Fixture::new();
     let input = fixture.input(44_100, 2, 4410);
-    let mut config = RunConfig::for_scenario(Scenario::MixStress);
-    config.mix_stress.sources = 4;
-    let plain = fixture.path("plain");
-    run(&config, &input, &plain, &Cancellation::default(), |_| {}).unwrap();
-    config.execution_profiling = true;
-    config.max_trace_events = 1;
-    let profiled = fixture.path("profiled");
-    let d = run(&config, &input, &profiled, &Cancellation::default(), |_| {}).unwrap();
-    assert_eq!(
-        fs::read(plain.join("processed.wav")).unwrap(),
-        fs::read(profiled.join("processed.wav")).unwrap()
-    );
-    assert!(d.trace_events_dropped > 0);
-    let latency = &d.latency;
-    assert_eq!(
-        latency["execution_profile"]["source_processing"]["calls"],
-        10
-    );
-    assert_eq!(latency["receive_execution"]["ordinary"]["calls"], 10);
-    assert!(
-        latency["receive_execution"]["ordinary"]["p99_ns"]
-            .as_u64()
-            .is_some()
-    );
-    assert!(
-        latency["receive_execution"]["unbudgeted"]["calls"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
-    assert!(latency["execution_profile"]["decode"]["p99_ns"].is_null());
-    assert!(analyze(&profiled).is_ok());
+    for stream in [StreamKind::Voice, StreamKind::Desktop] {
+        let mut config = RunConfig::for_scenario(Scenario::MixStress);
+        config.stream = stream;
+        if stream == StreamKind::Desktop {
+            config.bitrate_bps = 196_000;
+        }
+        config.mix_stress.sources = 4;
+        let plain = fixture.path(&format!("plain-{stream:?}"));
+        run(&config, &input, &plain, &Cancellation::default(), |_| {}).unwrap();
+        config.execution_profiling = true;
+        config.max_trace_events = 1;
+        let profiled = fixture.path(&format!("profiled-{stream:?}"));
+        let d = run(&config, &input, &profiled, &Cancellation::default(), |_| {}).unwrap();
+        assert_eq!(
+            fs::read(plain.join("processed.wav")).unwrap(),
+            fs::read(profiled.join("processed.wav")).unwrap()
+        );
+        assert!(d.trace_events_dropped > 0);
+        let latency = &d.latency;
+        assert_eq!(
+            latency["execution_profile"]["source_processing"]["calls"],
+            10
+        );
+        assert_eq!(latency["receive_execution"]["ordinary"]["calls"], 10);
+        assert!(
+            latency["receive_execution"]["ordinary"]["p99_ns"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            latency["receive_execution"]["unbudgeted"]["calls"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(latency["execution_profile"]["decode"]["p99_ns"].is_null());
+        for stage in ["queue_read", "gain", "activity", "limiter", "channel_map"] {
+            let timing = &latency["execution_profile"]["source_stages"][stage];
+            assert_eq!(timing["calls"], 10);
+            assert!(timing["p99_ns"].as_u64().is_some());
+            assert_eq!(
+                timing["bins"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_u64().unwrap())
+                    .sum::<u64>(),
+                10
+            );
+        }
+        assert!(analyze(&profiled).is_ok());
+    }
 }
 
 #[cfg(feature = "codec-opus")]

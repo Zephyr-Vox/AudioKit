@@ -403,3 +403,12 @@ format checks, warning-as-error Rustdoc and Release build pass. Deterministic
 regressions include EOF with delayed packets at 10/20 ms ptime, independent
 sample clocks, trace truncation, queue conservation, cancellation, explicit
 recovery without residual drift and waveform-identical replay.
+
+Source-stage diagnosis further divides ordinary source processing into bounded
+queue/gain/activity/limiter/channel-map timing sets. These are nested regions;
+do not double-count them with the parent. Mono/stereo tests retain exact output,
+and a core graph regression verifies that toggling timing does not reset gain,
+activity, limiter or tail histories. `source-dsp-diagnosis.md` records three
+Release repeats with disabled-timing controls: source limiting dominates, and
+64-source realtime performance remains unaccepted. This diagnostic slice does
+not optimize or alter the accepted DSP algorithms.

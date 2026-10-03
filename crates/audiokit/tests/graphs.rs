@@ -30,6 +30,81 @@ fn registration(id: u64, kind: StreamKind) -> SourceRegistration {
         kind,
     }
 }
+
+#[test]
+fn source_stage_timers_are_nested_and_observation_toggle_preserves_audio_state() {
+    let mut plain = RenderGraph::new(Default::default()).unwrap();
+    let mut profiled = RenderGraph::new(Default::default()).unwrap();
+    let voice = registration(1, StreamKind::Voice);
+    let desktop = registration(2, StreamKind::Desktop);
+    for graph in [&mut plain, &mut profiled] {
+        graph.register(voice).unwrap();
+        graph.register(desktop).unwrap();
+    }
+    for block in 0..24 {
+        let enabled = block % 2 == 0;
+        profiled.set_execution_profiling(enabled);
+        let gain = if block < 8 {
+            1.0
+        } else if block < 16 {
+            0.0
+        } else {
+            2.0
+        };
+        let speech: Vec<_> = (0..480)
+            .map(|i| {
+                if block % 3 == 0 {
+                    0.0
+                } else {
+                    ((i + block * 480) as f32 * 0.17).sin() * 2.0
+                }
+            })
+            .collect();
+        let media: Vec<_> = (0..960)
+            .map(|i| ((i + block * 960) as f32 * 0.07).sin() * 0.3)
+            .collect();
+        for graph in [&mut plain, &mut profiled] {
+            graph.set_gain(voice.key, gain).unwrap();
+            graph.push_pcm(voice.key, voice.epoch, &speech).unwrap();
+            graph.push_pcm(desktop.key, desktop.epoch, &media).unwrap();
+        }
+        let mut a = [0.0; 960];
+        let mut b = [0.0; 960];
+        let ma = plain.render_into(&mut a).unwrap();
+        let mb = profiled.render_into(&mut b).unwrap();
+        assert_eq!(a, b);
+        assert!(ma.execution_profile.is_none());
+        assert_eq!(mb.execution_profile.is_some(), enabled);
+        if let Some(p) = &mb.execution_profile {
+            let s = &p.source_stages;
+            let children =
+                s.queue_read_ns + s.gain_ns + s.activity_ns + s.limiter_ns + s.channel_map_ns;
+            assert!(children <= p.source_processing_ns);
+            assert!(
+                p.source_processing_ns + p.mix_ns + p.master_limiter_ns + p.signal_analysis_ns
+                    <= mb.execution_ns
+            );
+            assert!(p.decode_ns.is_none() && p.pcm_admission_ns.is_none());
+        }
+        let mut ma = serde_json::to_value(ma).unwrap();
+        let mut mb = serde_json::to_value(mb).unwrap();
+        for value in [&mut ma, &mut mb] {
+            value.as_object_mut().unwrap().remove("execution_ns");
+            value.as_object_mut().unwrap().remove("execution_profile");
+        }
+        assert_eq!(ma, mb);
+    }
+    loop {
+        let mut a = [0.0; 960];
+        let mut b = [0.0; 960];
+        let frames = plain.drain_into(&mut a).unwrap();
+        assert_eq!(frames, profiled.drain_into(&mut b).unwrap());
+        assert_eq!(a, b);
+        if frames == 0 {
+            break;
+        }
+    }
+}
 struct Encoder {
     format: AudioFormat,
     fail: bool,
