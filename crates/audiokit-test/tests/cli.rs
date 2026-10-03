@@ -69,14 +69,19 @@ fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
     let output = execute(&["list-scenarios", "--json"]);
     assert!(output.status.success());
     assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 4);
-    assert_eq!(value(&output)["capabilities"]["gui"], false);
+    assert_eq!(value(&output)["capabilities"]["gui"], cfg!(feature = "gui"));
     assert_eq!(value(&output)["capabilities"]["devices"], false);
     assert_eq!(value(&output)["capabilities"]["sweep"], true);
-    for cmd in ["--gui", "devices"] {
+    for cmd in ["devices"].into_iter().chain(if cfg!(feature = "gui") {
+        None
+    } else {
+        Some("--gui")
+    }) {
         let output = execute(&[cmd]);
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value(&output)["exit_code"], 3);
     }
+    assert_eq!(execute(&["--gui", "--unknown"]).status.code(), Some(2));
 }
 
 #[test]

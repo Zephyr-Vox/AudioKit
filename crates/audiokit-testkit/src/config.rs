@@ -172,6 +172,17 @@ pub struct ExecutionPlan {
     pub stages: Vec<Stage>,
 }
 impl RunConfig {
+    /// Shared scenario/profile defaults; desktop bypasses voice processing at 196 kbit/s.
+    /// Unsupported stream kinds are rejected by validate, not silently converted.
+    pub fn for_profile(scenario: Scenario, stream: StreamKind) -> Self {
+        let mut config = Self::for_scenario(scenario);
+        config.stream = stream;
+        if stream == StreamKind::Desktop {
+            config.bitrate_bps = 196_000;
+            config.processing.enabled = false;
+        }
+        config
+    }
     /// Shared scenario defaults; render stress and receiver replay disable capture APM.
     pub fn for_scenario(scenario: Scenario) -> Self {
         let mut config = Self {

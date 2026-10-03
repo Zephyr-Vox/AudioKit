@@ -3,6 +3,9 @@
 Shared Rust audio components for ZephyrVox clients. Transports, account state,
 UI and application permissions belong to the host.
 
+Minimum Rust version: 1.92. The optional GUI pins Slint 1.18.1; CLI-only builds
+do not require Slint, a renderer or a display service.
+
 The initial `audiokit` crate defines validated PCM formats, opaque source keys,
 clock/epoch metadata and synchronous codec, processing and device-port contracts.
 Its core build has no SDK, native-device, async-runtime, UI or C-toolchain dependency.
@@ -14,7 +17,7 @@ cargo run -p audiokit --example in_memory_block --offline
 
 DSP/backend extraction and the shared CLI/Slint test application are incremental.
 See `docs/migration.md` for implemented boundaries and remaining work. No published
-package or GUI is implied by the existence of these initial contracts.
+package is implied by the existence of these initial contracts.
 
 ## Shared DSP
 
@@ -87,7 +90,10 @@ See `docs/source-dsp-diagnosis.md` for the measured 32/64-source limiter bottlen
 mono/stereo controls and the limits of the CPU attribution.
 See `docs/limiter-cache-optimization.md` for the behavior-preserving target cache,
 bitwise reference coverage and before/after worker CPU results.
-Slint, native device scenarios and the server host bridge are still pending.
+The optional Slint workbench now supports offline scenarios, parameter editing,
+diagnostic/WAV export and explicitly requested native WAV audition. See
+`docs/gui-workbench.md`. Microphone/duplex scenarios and the server host bridge
+are still pending; audition does not turn an offline bundle into hardware E2E.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
 is implied by the deterministic tests in this workspace.

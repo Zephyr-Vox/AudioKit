@@ -175,4 +175,6 @@ The CLI already delegates shared codecs/resampling/DSP and safe Windows activati
 Reference-to-capture time mapping, native hotplug, duplex AEC calibration and full
 hardware drift runs remain separate verification gates. Basic offline report
 persistence and bounded snapshots are implemented. Real-time artifact workers,
-event correlation, independent output-oracle scenarios and GUI remain A5 work.
+event correlation, independent output-oracle scenarios and GUI microphone/duplex
+scenarios remain A5 work. The initial offline Slint workbench delegates shared
+runner execution/export; its optional audition is not physical E2E certification.

@@ -1,4 +1,8 @@
-//! Headless frontend for the shared AudioKit runner; GUI and devices are not implemented yet.
+//! CLI and optional Slint frontend for the same shared AudioKit runner.
+#[cfg(feature = "gui")]
+mod gui;
+#[cfg(any(feature = "gui", test))]
+mod workbench;
 use audiokit_testkit::{
     Cancellation, Error, RunConfig, Scenario, SweepMatrix, analyze, compare, plan_file, replay,
     run, sweep,
@@ -21,9 +25,11 @@ const HELP: &str = "AudioKit debugging CLI (initial offline suite)
   replay --bundle DIR --out-dir NEW_DIR [--input ORIGINAL_WAV] [--quiet]
   compare --baseline DIR --candidate DIR [--json]
   sweep --input WAV --matrix FILE --out-dir NEW_DIR [--config FILE] [--retain-input] [--quiet]
+  --gui [--config FILE] [--input WAV_OR_PACKET_JSON] [--out-dir BASE_DIR] (feature gui)
 All results are JSON on stdout; progress is on stderr. Input retention is opt-in.
 WAV PCM16/24/32 or float32 mono/stereo; receive-simulation takes packet JSON v1.
-No devices/network/GUI. Packet payload retention is opt-in audio-sharing consent.
+CLI runs never open devices or network. GUI audition is explicit; no hardware/server E2E yet.
+Packet payload retention is opt-in audio-sharing consent.
 Exit: 0 checks pass, 1 checks fail, 2 invalid arguments, 3 unavailable capability,
       4 execution/I/O failure, 130 cancellation.
 ";
@@ -66,15 +72,7 @@ impl Options {
     }
     fn config(&self) -> Result<RunConfig, Error> {
         let mut config: RunConfig = match self.path("--config") {
-            Some(path) => {
-                let file = std::fs::File::open(path)?;
-                let mut data = Vec::new();
-                file.take(1_048_577).read_to_end(&mut data)?;
-                if data.len() > 1_048_576 {
-                    return Err(Error::Invalid("configuration exceeds 1 MiB".into()));
-                }
-                serde_json::from_slice(&data)?
-            }
+            Some(path) => audiokit_testkit::read_config(&path)?,
             None => RunConfig::default(),
         };
         if let Some(value) = self.values.get("--scenario") {
@@ -138,13 +136,13 @@ fn execute() -> Result<(Value, i32), Error> {
             Ok((Value::Null, 0))
         }
         "--version" => Ok((
-            json!({"name":"audiokit-test", "version":env!("CARGO_PKG_VERSION"), "revision":audiokit_testkit::BUILD_REVISION, "source_digest":audiokit_testkit::BUILD_SOURCE_DIGEST, "gui":false}),
+            json!({"name":"audiokit-test", "version":env!("CARGO_PKG_VERSION"), "revision":audiokit_testkit::BUILD_REVISION, "source_digest":audiokit_testkit::BUILD_SOURCE_DIGEST, "gui":cfg!(feature="gui")}),
             0,
         )),
         "list-scenarios" => {
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip","mix-stress","receive-simulation"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"independent_clocks":cfg!(feature="codec-opus"),"packet_replay":cfg!(feature="codec-opus"),"mix_stress":true,"sweep":true,"packet_sweep":false,"devices":false,"gui":false,"server_e2e":false}}),
+                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip","mix-stress","receive-simulation"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"independent_clocks":cfg!(feature="codec-opus"),"packet_replay":cfg!(feature="codec-opus"),"mix_stress":true,"sweep":true,"packet_sweep":false,"devices":false,"gui":cfg!(feature="gui"),"gui_wav_preview":cfg!(feature="gui"),"server_e2e":false}}),
                 0,
             ))
         }
@@ -269,7 +267,20 @@ fn execute() -> Result<(Value, i32), Error> {
             let code = result.exit_code;
             Ok((serde_json::to_value(result)?, code))
         }
-        "--gui" | "devices" => Err(Error::Capability(format!(
+        "--gui" => {
+            let opts = Options::parse(args, &["--config", "--input", "--out-dir"])?;
+            #[cfg(feature = "gui")]
+            {
+                gui::launch(opts.config()?, opts.path("--input"), opts.path("--out-dir"))?;
+                Ok((Value::Null, 0))
+            }
+            #[cfg(not(feature = "gui"))]
+            {
+                let _ = opts;
+                Err(Error::Capability("rebuild with --features gui".into()))
+            }
+        }
+        "devices" => Err(Error::Capability(format!(
             "{command} is planned but not implemented"
         ))),
         _ => Err(Error::Invalid("unknown command; use --help".into())),

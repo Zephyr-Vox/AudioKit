@@ -62,6 +62,74 @@ fn bypass() -> RunConfig {
 }
 
 #[test]
+fn presets_and_exports_are_bounded_validated_and_never_overwrite() {
+    use audiokit_testkit::{
+        export_bundle, export_wav, inspect, read_config, read_processed_wav, read_wav, write_config,
+    };
+    let fixture = Fixture::new();
+    let input = fixture.input(48_000, 1, 1001);
+    for retained in [false, true] {
+        let mut config = bypass();
+        config.retain_input = retained;
+        let source = fixture.path(&format!("source-{retained}"));
+        run(&config, &input, &source, &Cancellation::default(), |_| {}).unwrap();
+        // Unlisted files (including secrets or extra input) never enter an export.
+        fs::write(source.join("unlisted.txt"), "must stay local").unwrap();
+        let destination = fixture.path(&format!("export-{retained}"));
+        let manifest = export_bundle(&source, &destination, &Cancellation::default()).unwrap();
+        assert_eq!(manifest.input_audio_authorized, retained);
+        assert_eq!(destination.join("input.wav").exists(), retained);
+        assert!(!destination.join("unlisted.txt").exists());
+        assert!(inspect(&destination).is_ok());
+        assert!(export_bundle(&source, &destination, &Cancellation::default()).is_err());
+        let wav = fixture.path(&format!("export-{retained}.wav"));
+        export_wav(&source, &wav, &Cancellation::default()).unwrap();
+        let bytes = fs::read(&wav).unwrap();
+        assert_eq!(bytes, fs::read(source.join("processed.wav")).unwrap());
+        assert!(export_wav(&source, &wav, &Cancellation::default()).is_err());
+        assert_eq!(fs::read(&wav).unwrap(), bytes);
+        let (format, pcm) = read_processed_wav(&source).unwrap();
+        let (export_format, export_pcm) = read_wav(&wav, 268_435_584, 67_108_864).unwrap();
+        assert_eq!(format, export_format);
+        assert_eq!(pcm, export_pcm);
+        assert!(read_wav(&wav, 1, 1001).is_err());
+        assert!(read_wav(&wav, 268_435_585, 1001).is_err());
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        let stopped = fixture.path(&format!("stopped-{retained}"));
+        assert!(matches!(
+            export_bundle(&source, &stopped, &cancelled),
+            Err(Error::Cancelled)
+        ));
+        assert!(!stopped.exists());
+        assert!(matches!(
+            export_wav(&source, &stopped, &cancelled),
+            Err(Error::Cancelled)
+        ));
+        assert!(!stopped.exists());
+        fs::write(source.join("processed.wav"), "tampered").unwrap();
+        let rejected = fixture.path(&format!("rejected-{retained}"));
+        assert!(export_bundle(&source, &rejected, &Cancellation::default()).is_err());
+        assert!(export_wav(&source, &rejected, &Cancellation::default()).is_err());
+        assert!(read_processed_wav(&source).is_err());
+        assert!(!rejected.exists());
+    }
+    let config = bypass();
+    let preset = fixture.path("preset.json");
+    write_config(&preset, &config).unwrap();
+    assert_eq!(
+        serde_json::to_value(read_config(&preset).unwrap()).unwrap(),
+        serde_json::to_value(&config).unwrap()
+    );
+    assert!(write_config(&preset, &config).is_err());
+    let large = fixture.path("large.json");
+    fs::write(&large, vec![b' '; 1_048_577]).unwrap();
+    assert!(read_config(&large).is_err());
+    fs::write(&large, br#"{"typo":true}"#).unwrap();
+    assert!(read_config(&large).is_err());
+}
+
+#[test]
 fn profiling_is_pcm_neutral_and_histograms_survive_trace_truncation() {
     let fixture = Fixture::new();
     let input = fixture.input(44_100, 2, 4410);

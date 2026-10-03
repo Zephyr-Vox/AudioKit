@@ -1,6 +1,7 @@
 //! Integrity-checked import, offline analysis and reproducible re-execution.
 use crate::{
-    Cancellation, Diagnostics, Error, Manifest, ProgressEvent, Result, RunConfig, TraceEvent, io,
+    Artifact, Cancellation, Diagnostics, Error, Manifest, ProgressEvent, Result, RunConfig,
+    TraceEvent, io,
 };
 use serde::Serialize;
 use std::{
@@ -14,6 +15,84 @@ struct Bundle {
     diagnostics: Diagnostics,
     trace: Vec<TraceEvent>,
     input: Option<Vec<u8>>,
+}
+
+/// Inspects a hash-validated bundle without replaying audio or opening devices.
+/// Large artifact validation is worker-side I/O, not suitable for a UI/audio callback.
+pub fn inspect(root: &Path) -> Result<(Manifest, Diagnostics)> {
+    let bundle = load(root)?;
+    Ok((bundle.manifest, bundle.diagnostics))
+}
+
+/// Copies only validated, manifest-listed artifacts into a new directory.
+/// Retained source audio/payloads are included only if authorized in the source bundle.
+/// The caller must explicitly request export. Cancellation/error may leave a partial
+/// destination; the manifest is written last and existing destinations are refused.
+pub fn export_bundle(root: &Path, destination: &Path, stop: &Cancellation) -> Result<Manifest> {
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let root = root.canonicalize()?;
+    let bundle = load(&root)?;
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    std::fs::create_dir(destination)?;
+    for artifact in &bundle.manifest.artifacts {
+        if stop.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let data = artifact_bytes(&root, artifact)?;
+        io::write_new(&destination.join(&artifact.path), &data)?;
+    }
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    io::write_json(&destination.join("manifest.json"), &bundle.manifest)?;
+    Ok(bundle.manifest)
+}
+
+fn artifact_bytes(root: &Path, artifact: &Artifact) -> Result<Vec<u8>> {
+    let path = root.join(&artifact.path).canonicalize()?;
+    if !path.starts_with(root) {
+        return Err(Error::Invalid("artifact escapes bundle directory".into()));
+    }
+    let data = io::bytes(&path, artifact.bytes)?;
+    if data.len() as u64 != artifact.bytes || io::hash(&data) != artifact.sha256 {
+        return Err(Error::Invalid("artifact changed during read/export".into()));
+    }
+    Ok(data)
+}
+
+fn output_bytes(root: &Path) -> Result<Vec<u8>> {
+    let root = root.canonicalize()?;
+    let bundle = load(&root)?;
+    let artifact = bundle
+        .manifest
+        .artifacts
+        .iter()
+        .find(|a| a.path == "processed.wav")
+        .ok_or_else(|| Error::Invalid("output WAV missing".into()))?;
+    artifact_bytes(&root, artifact)
+}
+
+/// Exports the exact validated float WAV, without re-encoding or overwriting a file.
+/// Includes processed audio only; source retention does not affect this operation.
+pub fn export_wav(root: &Path, destination: &Path, stop: &Cancellation) -> Result<()> {
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let bytes = output_bytes(root)?;
+    if stop.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    io::write_new(destination, &bytes)
+}
+
+/// Loads the exact hash-validated processed samples for explicit worker-side audition.
+/// Does not open a device. A second mutable path read is deliberately avoided.
+pub fn read_processed_wav(root: &Path) -> Result<(audiokit::AudioFormat, Vec<f32>)> {
+    io::wav(&output_bytes(root)?, 67_108_864)
 }
 fn load(root: &Path) -> Result<Bundle> {
     let root = root.canonicalize()?;

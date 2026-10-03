@@ -2,12 +2,14 @@
 
 The first A5 slice is implemented: a reusable `audiokit-testkit` library and the
 headless `audiokit-test` application. CLI is for automation, reproduction and
-evidence analysis. Slint will provide the human E2E/recording/listening/export
-workbench on the same runner. Deterministic virtual packet faults and serial
+evidence analysis. The optional Slint offline workbench now uses the same runner
+for parameter editing, listening and export; see `gui-workbench.md`.
+Deterministic virtual packet faults and serial
 parameter sweeps, correlated mix stress and independent virtual sample clocks are
 implemented. Single-source external Opus packet/schedule replay is available;
-see `packet-replay.md` for its separate input/material contract. GUI, real devices,
-live host packet export and host/server E2E are **not implemented yet**.
+see `packet-replay.md` for its separate input/material contract. Microphone/duplex
+scenarios, live host packet export and host/server E2E are **not implemented yet**.
+Native WAV audition is explicit and compiled, not hardware-accepted.
 There is no arbitrary node-connection editor or selectable endpoint range yet.
 
 ## Production Coverage
@@ -421,3 +423,13 @@ tails. The independent reconstruction corpus remains passing. All 16 optimized
 Release stress WAVs match the pre-change output exactly; 64-desktop calls still
 sometimes exceed 10 ms, so production admission remains 32. See
 `limiter-cache-optimization.md` for measurements, memory cost and reproduction.
+
+The first optional Slint workbench now delegates file scenarios to the same runner.
+It supports parameter snapshots, background execution/cancel/close finalization,
+hash-validated result loading, portable bundle/WAV export and explicit native WAV
+audition. GUI/API waveform parity, consent reset and 1120x900/720x900/720x700 software
+screenshots are covered. See `gui-workbench.md` for commands, privacy and boundaries.
+Windows validation passes 133 workspace unit/integration tests plus one doctest,
+and 33 headless unit/integration tests plus one doctest. Rust 1.92 compile-checks all
+workspace features/targets. Native audition, microphone/duplex and live server E2E
+are not hardware-accepted by these offline tests; A6 remains pending.

@@ -1,0 +1,248 @@
+import { Button, CheckBox, ComboBox, LineEdit, Slider, ScrollView, TabWidget, TextEdit, ProgressIndicator } from "std-widgets.slint";
+
+export struct Controls {
+    processing: bool, noise: int, high-pass: bool, agc: bool, adaptive: bool,
+    bitrate: string, ptime: int, capture-quality: int, render-quality: int,
+    output-rate: string, jitter: string, sources: string, silent: string, source-gain: string,
+    admission: string, fade: string, source-ceiling: string, master-ceiling: string,
+    lookahead: string, attack: string, release: string, headroom: string,
+}
+export struct StageRow { name: string, state: string, applied: bool }
+component Field inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    in property <bool> active: true;
+    spacing: 12px;
+    Text { text: root.label; width: 190px; color: #555e64; vertical-alignment: center; }
+    LineEdit { text <=> root.value; enabled: root.active; }
+}
+component Heading inherits Text { font-size: 15px; font-weight: 600; color: #18262c; }
+export component Workbench inherits Window {
+    title: "AudioKit / Test Workbench";
+    preferred-width: 1120px; preferred-height: 900px;
+    min-width: 720px; min-height: 700px;
+    background: #f5f7f8; default-font-size: 14px;
+    in-out property <int> scenario;
+    in-out property <int> profile;
+    in-out property <Controls> controls;
+    in-out property <string> input-path;
+    in-out property <string> output-base;
+    in-out property <bool> retain-input;
+    in-out property <bool> profiling;
+    in-out property <float> volume;
+    in-out property <string> preset-json;
+    in property <[string]> output-devices;
+    in-out property <int> output-device;
+    in-out property <int> panel-index;
+    in-out property <int> result-index;
+    in-out property <length> scroll-position;
+    in property <bool> busy;
+    in property <bool> has-result;
+    in property <bool> playable;
+    in property <bool> failed;
+    in property <float> progress;
+    in property <string> status: "Ready";
+    in property <string> coverage: "Offline";
+    in property <string> peak: "--";
+    in property <string> clamps: "--";
+    in property <string> gaps: "--";
+    in property <string> cpu: "--";
+    in property <string> result-info;
+    in property <string> evidence;
+    in property <string> latency;
+    in property <string> checks;
+    in property <[StageRow]> stages;
+    callback choose-input(); callback choose-output(); callback select-profile();
+    callback reset(); callback load-preset(); callback save-preset(); callback apply-json();
+    callback validate(); callback execute(); callback cancel(); callback load-result();
+    callback export-bundle(); callback export-wav(); callback preview();
+    callback sync-json(); callback refresh-outputs();
+    VerticalLayout {
+        padding: 20px; spacing: 14px;
+        HorizontalLayout {
+            spacing: 16px; height: 36px;
+            Text { text: "AudioKit"; font-size: 24px; font-weight: 700; color: #18262c; vertical-alignment: center; }
+            Text { text: "TEST WORKBENCH"; color: #68767f; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            Text { text: root.coverage; color: #287269; vertical-alignment: center; }
+        }
+        HorizontalLayout {
+            spacing: 10px; height: 36px;
+            ComboBox { enabled: !root.busy; model: ["Capture PCM", "Opus roundtrip", "Multi-source render", "Packet replay"]; current-index <=> root.scenario; selected(value) => { root.select-profile(); } }
+            ComboBox { enabled: !root.busy; model: ["Voice / mono", "Desktop / stereo"]; current-index <=> root.profile; selected(value) => { root.select-profile(); } }
+        }
+        HorizontalLayout {
+            spacing: 10px; height: 36px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Load preset"; enabled: !root.busy; clicked => { root.load-preset(); } }
+            Button { text: "Save preset"; enabled: !root.busy; clicked => { root.save-preset(); } }
+            Button { text: "Reset"; enabled: !root.busy; clicked => { root.reset(); } }
+        }
+        ScrollView {
+            content-y <=> root.scroll-position;
+            VerticalLayout {
+                padding-right: 12px; spacing: 14px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text { text: root.scenario == 3 ? "Packet JSON" : "Input WAV"; width: 95px; vertical-alignment: center; }
+                    LineEdit { text <=> root.input-path; enabled: !root.busy; }
+                    Button { text: "Browse"; enabled: !root.busy; clicked => { root.choose-input(); } }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text { text: "Output folder"; width: 95px; vertical-alignment: center; }
+                    LineEdit { text <=> root.output-base; enabled: !root.busy; }
+                    Button { text: "Browse"; enabled: !root.busy; clicked => { root.choose-output(); } }
+                }
+                HorizontalLayout {
+                    spacing: 20px;
+                    CheckBox { text: "Include original audio / payloads"; checked <=> root.retain-input; enabled: !root.busy; }
+                    CheckBox { text: "CPU profiling"; checked <=> root.profiling; enabled: !root.busy; }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                TabWidget {
+                    height: 310px;
+                    current-index <=> root.panel-index;
+                    Tab {
+                        title: "Capture";
+                        VerticalLayout {
+                            padding: 16px; spacing: 10px;
+                            HorizontalLayout {
+                                CheckBox { text: "Voice processing"; checked <=> root.controls.processing; enabled: !root.busy && root.profile == 0 && root.scenario < 2; }
+                                CheckBox { text: "High-pass"; checked <=> root.controls.high-pass; enabled: !root.busy && root.controls.processing && root.scenario < 2; }
+                                CheckBox { text: "AGC2"; checked <=> root.controls.agc; enabled: !root.busy && root.controls.processing && root.scenario < 2; }
+                                CheckBox { text: "Adaptive gain"; checked <=> root.controls.adaptive; enabled: !root.busy && root.controls.processing && root.controls.agc && root.scenario < 2; }
+                            }
+                            HorizontalLayout {
+                                Text { text: "Noise suppression"; width: 190px; vertical-alignment: center; }
+                                ComboBox { model: ["Off", "Low", "Moderate", "High", "Very high"]; current-index <=> root.controls.noise; enabled: !root.busy && root.controls.processing && root.scenario < 2; }
+                            }
+                            HorizontalLayout {
+                                Text { text: "Capture resampler"; width: 190px; vertical-alignment: center; }
+                                ComboBox { model: ["Balanced", "High quality"]; current-index <=> root.controls.capture-quality; enabled: !root.busy && root.scenario != 3; }
+                            }
+                            Text { text: "AEC: unavailable / no aligned playback reference"; color: #8a6422; wrap: word-wrap; }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                    Tab {
+                        title: "Codec";
+                        VerticalLayout {
+                            padding: 16px; spacing: 12px;
+                            Field { label: "Target bitrate (bit/s)"; value <=> root.controls.bitrate; active: !root.busy && root.scenario == 1; }
+                            HorizontalLayout {
+                                Text { text: "Packet duration (ms)"; width: 190px; vertical-alignment: center; }
+                                ComboBox { model: ["10", "20", "40", "60"]; current-index <=> root.controls.ptime; enabled: !root.busy && root.scenario == 1; }
+                            }
+                            Field { label: "Jitter startup (ms)"; value <=> root.controls.jitter; active: !root.busy && (root.scenario == 1 || root.scenario == 3); }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                    Tab {
+                        title: "Render";
+                        VerticalLayout {
+                            padding: 12px; spacing: 3px;
+                            Field { label: "Output sample rate (Hz)"; value <=> root.controls.output-rate; active: !root.busy && root.scenario != 0; }
+                            HorizontalLayout {
+                                Text { text: "Render resampler"; width: 190px; vertical-alignment: center; }
+                                ComboBox { model: ["Balanced", "High quality"]; current-index <=> root.controls.render-quality; enabled: !root.busy && root.scenario != 0; }
+                            }
+                            Field { label: "Source admission limit"; value <=> root.controls.admission; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Gain fade (ms)"; value <=> root.controls.fade; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Sources / render stress"; value <=> root.controls.sources; active: !root.busy && root.scenario == 2; }
+                            Field { label: "Silent sources"; value <=> root.controls.silent; active: !root.busy && root.scenario == 2; }
+                            Field { label: "Source gain (linear)"; value <=> root.controls.source-gain; active: !root.busy && root.scenario == 2; }
+                        }
+                    }
+                    Tab {
+                        title: "Protection";
+                        VerticalLayout {
+                            padding: 12px; spacing: 3px;
+                            Field { label: "Source ceiling (dBFS)"; value <=> root.controls.source-ceiling; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Master ceiling (dBFS)"; value <=> root.controls.master-ceiling; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Master lookahead (ms)"; value <=> root.controls.lookahead; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Master attack (ms)"; value <=> root.controls.attack; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Master release (ms)"; value <=> root.controls.release; active: !root.busy && root.scenario != 0; }
+                            Field { label: "Master headroom (dB)"; value <=> root.controls.headroom; active: !root.busy && root.scenario != 0; }
+                        }
+                    }
+                    Tab {
+                        title: "Advanced JSON";
+                        VerticalLayout {
+                            padding: 12px; spacing: 8px;
+                            TextEdit { text <=> root.preset-json; enabled: !root.busy; font-family: "Consolas"; }
+                            HorizontalLayout {
+                                Button { text: "Sync from controls"; enabled: !root.busy; clicked => { root.sync-json(); } }
+                                Button { text: "Apply JSON"; enabled: !root.busy; clicked => { root.apply-json(); } }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px; height: 36px;
+                    Button { text: "Validate"; enabled: !root.busy; clicked => { root.validate(); } }
+                    Button { text: "Run"; enabled: !root.busy; clicked => { root.execute(); } }
+                    Button { text: "Cancel"; enabled: root.busy; clicked => { root.cancel(); } }
+                    ProgressIndicator { progress: root.progress; horizontal-stretch: 1; }
+                }
+                Text { text: root.status; color: root.failed ? #b63342 : #287269; wrap: word-wrap; }
+                Rectangle { height: 1px; background: #dce2e5; }
+                Heading { text: "Run diagnostics"; }
+                GridLayout {
+                    spacing: 12px;
+                    Row {
+                        Text { text: "Output peak"; color: #68767f; } Text { text: root.peak; }
+                        Text { text: "Safety clamps"; color: #68767f; } Text { text: root.clamps; }
+                    }
+                    Row {
+                        Text { text: "Missing frames"; color: #68767f; } Text { text: root.gaps; }
+                        Text { text: "Worker overruns"; color: #68767f; } Text { text: root.cpu; }
+                    }
+                }
+                Text { text: root.result-info; wrap: word-wrap; color: #68767f; }
+                TabWidget {
+                    height: 230px;
+                    current-index <=> root.result-index;
+                    Tab { title: "Coverage";
+                        ScrollView { VerticalLayout {
+                            padding: 12px; spacing: 4px;
+                            for stage in root.stages: HorizontalLayout {
+                                height: 26px; spacing: 12px;
+                                Text { text: stage.name; color: #273b43; }
+                                Text { text: stage.state; color: stage.applied ? #287269 : #677681; }
+                            }
+                        } }
+                    }
+                    Tab { title: "Checks"; TextEdit { text: root.checks; read-only: true; } }
+                    Tab { title: "Latency"; TextEdit { text: root.latency; read-only: true; font-family: "Consolas"; } }
+                    Tab { title: "Evidence"; TextEdit { text: root.evidence; read-only: true; font-family: "Consolas"; } }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button { text: "Load result"; enabled: !root.busy; clicked => { root.load-result(); } }
+                    Button { text: "Export bundle"; enabled: !root.busy && root.has-result; clicked => { root.export-bundle(); } }
+                    Button { text: "Export WAV"; enabled: !root.busy && root.has-result; clicked => { root.export-wav(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    ComboBox { model: root.output-devices; current-index <=> root.output-device; enabled: !root.busy; }
+                    Button {
+                        width: 36px; height: 36px; icon: @image-url("icons/refresh-cw.svg"); colorize-icon: true;
+                        accessible-label: "Refresh playback devices";
+                        enabled: !root.busy; clicked => { root.refresh-outputs(); }
+                        Tooltip { text: @markdown("Refresh playback devices"); }
+                    }
+                    Button {
+                        width: 36px; height: 36px; icon: @image-url("icons/play.svg"); colorize-icon: true;
+                        accessible-label: "Play processed WAV";
+                        enabled: !root.busy && root.playable; clicked => { root.preview(); }
+                        Tooltip { text: @markdown("Play processed WAV"); }
+                    }
+                    Text { text: "Volume"; vertical-alignment: center; }
+                    Slider { minimum: 0; maximum: 1; value <=> root.volume; enabled: !root.busy; }
+                }
+            }
+        }
+    }
+}

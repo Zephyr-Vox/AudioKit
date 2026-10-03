@@ -1,6 +1,6 @@
 [package]
 name = "audiokit-test"
-description = "Headless AudioKit audio debugging application"
+description = "AudioKit CLI and optional Slint audio debugging workbench"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,14 +10,21 @@ license.workspace = true
 default = ["processing-sonora", "codec-opus"]
 processing-sonora = ["audiokit-testkit/processing-sonora"]
 codec-opus = ["audiokit-testkit/codec-opus"]
+gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:image", "dep:audiokit-platform"]
 
 [dependencies]
 audiokit-testkit = { path = "../audiokit-testkit" }
 serde_json.workspace = true
 ctrlc.workspace = true
-
-[dev-dependencies]
+audiokit = { path = "../audiokit" }
+slint = { version = "=1.18.1", optional = true, default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-18", "accessibility"] }
+rfd = { version = "=0.17.2", optional = true }
+image = { version = "=0.25.8", optional = true, default-features = false, features = ["png"] }
+audiokit-platform = { path = "../audiokit-platform", optional = true, features = ["native-cpal"] }
 hound.workspace = true
+
+[build-dependencies]
+slint-build = { version = "=1.18.1", optional = true }
 
 [lints]
 workspace = true

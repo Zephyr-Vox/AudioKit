@@ -67,16 +67,20 @@ virtual loss/jitter/reorder/duplicate/forwarding-stall and bounded serial parame
 sweeps. Correlated render-only mix stress and independent capture/render virtual
 clocks now run on the same production graphs. Single-source external packet replay
 also calls the production receiver; the live host packet exporter is not connected.
-Slint and device-probe migration remain pending. See `testkit.md` and `packet-replay.md`.
+The first Slint offline workbench is implemented; device-probe migration remains
+pending. See `gui-workbench.md`, `testkit.md` and `packet-replay.md`.
 A6 still needs agent/TUI production device/scheduler
 switching, bounded legacy codec-map removal and hardware/E2E verification. Native
 device-to-host timestamp mapping and AEC delay calibration are not yet certified.
 Non-integral 10 ms native rates are explicitly rejected by the current filter-block
 adapter; supporting them is an outstanding resampler boundary improvement.
 
-SPEC files remain uncommitted. Windows Rust 1.98 is the tested environment; macOS,
-Linux and the declared Rust 1.91 floor have not been revalidated. CLI legacy Clippy
-lints remain visible; no broad warning suppression is introduced.
+SPEC files remain uncommitted. Windows Rust 1.98 is the regression-tested environment.
+The Rust 1.92 minimum is compile-checked on Windows for the all-feature workspace
+(including the optional Slint 1.18.1 GUI) and headless targets. Compiled Slint
+controls and the worker are exercised using a software test window, not native
+hardware or macOS/Linux verification. CLI legacy
+Clippy lints remain visible; no broad warning suppression is introduced.
 
 The true-peak correction is a separate behavior change: a longer independently
 validated production FIR plus configurable reconstruction headroom, not a silent

@@ -26,7 +26,10 @@ mod simulation;
 mod sweep;
 mod timing;
 mod transport;
-pub use bundle::{Analysis, Comparison, Evidence, analyze, compare, replay};
+pub use bundle::{
+    Analysis, Comparison, Evidence, analyze, compare, export_bundle, export_wav, inspect,
+    read_processed_wav, replay,
+};
 pub use config::{
     ExecutionPlan, NodeStatus, NoiseLevel, ProcessingConfig, RunConfig, Scenario, Stage,
 };
@@ -71,7 +74,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Compiled repository revision, or unavailable outside an AudioKit Git checkout.
 pub const BUILD_REVISION: &str = env!("AUDIOKIT_REVISION");
-/// Content fingerprint of workspace (or packaged crate) Rust/TOML and available lockfile.
+/// Content fingerprint of workspace/package Rust, TOML, Slint, SVG and available lockfile.
 pub const BUILD_SOURCE_DIGEST: &str = env!("AUDIOKIT_SOURCE_DIGEST");
 
 impl Error {
@@ -104,4 +107,32 @@ pub fn plan_file(config: &RunConfig, input: &std::path::Path) -> Result<Executio
     let plan = config.plan(format)?;
     runner::validate_plan(config, &plan)?;
     Ok(plan)
+}
+
+/// Reads a bounded preset (1 MiB). Execution still requires capability/config validation.
+/// This does not grant new input-retention consent or perform audio/device operations.
+pub fn read_config(path: &std::path::Path) -> Result<RunConfig> {
+    Ok(serde_json::from_slice(&io::bytes(path, 1_048_576)?)?)
+}
+
+/// Writes a CLI-compatible preset to a new file; never overwrites an existing file.
+pub fn write_config(path: &std::path::Path, config: &RunConfig) -> Result<()> {
+    config.validate()?;
+    io::write_json(path, config)
+}
+
+/// Loads bounded WAV PCM for an explicitly requested preview, without processing it.
+/// Sample limits match RunConfig; bytes allow an extra 128 bytes for output WAV headers.
+/// PCM16/24/32 and float32 are accepted.
+pub fn read_wav(
+    path: &std::path::Path,
+    max_bytes: u64,
+    max_samples: usize,
+) -> Result<(audiokit::AudioFormat, Vec<f32>)> {
+    if !(1..=268_435_584).contains(&max_bytes) || !(1..=67_108_864).contains(&max_samples) {
+        return Err(Error::Invalid(
+            "preview resource budget out of range".into(),
+        ));
+    }
+    io::wav(&io::bytes(path, max_bytes)?, max_samples)
 }

@@ -18,7 +18,7 @@ fn collect(path: &Path, paths: &mut Vec<std::path::PathBuf>) {
             collect(&path, paths);
         } else if matches!(
             path.extension().and_then(|s| s.to_str()),
-            Some("rs" | "toml")
+            Some("rs" | "toml" | "slint" | "svg")
         ) {
             paths.push(path);
         }
