@@ -81,6 +81,8 @@ pub struct RunConfig {
     pub max_payload_bytes: usize,
     /// Production receive/render controls, applied only to roundtrip.
     pub receive: ReceiveGraphConfig,
+    /// Deterministic virtual forwarding; rejected for the PCM-only scenario if enabled.
+    pub transport: crate::TransportConfig,
     /// Maximum input WAV bytes, 1..=268435456.
     pub max_input_bytes: u64,
     /// Maximum interleaved decoded input or output samples, each 1..=67108864.
@@ -104,6 +106,7 @@ impl Default for RunConfig {
             bitrate_bps: 96_000,
             max_payload_bytes: 4000,
             receive: Default::default(),
+            transport: Default::default(),
             max_input_bytes: 64 * 1024 * 1024,
             max_pcm_samples: 16 * 1024 * 1024,
             max_trace_events: 4096,
@@ -162,6 +165,12 @@ impl RunConfig {
         Ok(())
     }
     pub(crate) fn validate_parameters(&self) -> Result<()> {
+        self.transport.validate()?;
+        if self.scenario == Scenario::FileProcessing && self.transport.is_impaired() {
+            return Err(Error::Invalid(
+                "PCM-only scenario has no encoded transport".into(),
+            ));
+        }
         if self.schema_version != 1
             || !(1..=268_435_456).contains(&self.max_input_bytes)
             || !(1..=67_108_864).contains(&self.max_pcm_samples)

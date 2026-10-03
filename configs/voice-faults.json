@@ -1,0 +1,19 @@
+{
+  "scenario": "file-roundtrip",
+  "stream": "voice",
+  "bitrate_bps": 96000,
+  "ptime": 20,
+  "processing": { "enabled": false },
+  "max_pcm_samples": 2000000,
+  "transport": {
+    "seed": 233,
+    "delay_ms": 20,
+    "jitter_ms": 15,
+    "loss_per_mille": 30,
+    "duplicate_per_mille": 50,
+    "reorder_every": 10,
+    "reorder_delay_ms": 60,
+    "stall_start_ms": 1000,
+    "stall_duration_ms": 100
+  }
+}

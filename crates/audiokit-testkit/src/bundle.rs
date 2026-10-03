@@ -147,6 +147,67 @@ fn load(root: &Path) -> Result<Bundle> {
     })
 }
 /// Offline observations from recorded evidence, not an unproven root-cause classifier.
+#[derive(Debug, Clone, Serialize)]
+pub struct Evidence {
+    /// Retained trace ordinal; observation order, not causal order.
+    pub ordinal: u64,
+    /// Actual observation stage, not a predicted root cause.
+    pub stage: String,
+    /// Scheduling timestamp in the explicitly named time domain.
+    pub time_ns: u64,
+    /// Timestamp domain, distinct from the sample domain.
+    pub time_clock_domain: String,
+    /// Sample range clock domain.
+    pub clock_domain: String,
+    /// First observed stage-local sample frame.
+    pub first_frame: u64,
+    /// Length of that stage-local observation interval.
+    pub frames: u64,
+    /// Observed injection/receiver/render flags, not audible-fault classifications.
+    pub flags: Vec<String>,
+}
+
+fn evidence_flags(event: &TraceEvent) -> Vec<String> {
+    let mut flags = Vec::new();
+    let metrics = &event.metrics;
+    if event.stage == "transport_schedule" {
+        for (key, flag) in [
+            ("dropped", "injection_drop"),
+            ("reorder_selected", "injection_reorder_selection"),
+            ("stalled", "injection_stall"),
+        ] {
+            if metrics[key] == true {
+                flags.push(flag.into());
+            }
+        }
+    }
+    if event.stage == "transport_arrival"
+        && let Some(outcome) = metrics["outcome"]
+            .as_str()
+            .filter(|value| *value != "accepted")
+    {
+        flags.push(format!("receiver_{outcome}"));
+    }
+    if event.stage == "render_output" {
+        if metrics["sources"].as_array().is_some_and(|sources| {
+            sources
+                .iter()
+                .any(|source| source["missing_frames"].as_u64().unwrap_or(0) > 0)
+        }) {
+            flags.push("source_missing_frames".into());
+        }
+        if metrics["master_limiter"]["safety_clamped_samples"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+        {
+            flags.push("master_safety_clamp".into());
+        }
+    }
+    flags
+}
+
+/// Integrity-verified summary and a bounded timeline of observed flags.
 #[derive(Debug, Serialize)]
 pub struct Analysis {
     /// Response schema version.
@@ -169,6 +230,10 @@ pub struct Analysis {
     pub observations: Vec<String>,
     /// Whether the importing binary differs from the recorded source tree.
     pub build_changed: bool,
+    /// At most 64 flagged retained intervals; omitted trace remains unknown.
+    pub evidence: Vec<Evidence>,
+    /// Flagged intervals beyond the analysis cap, separate from recorder loss.
+    pub evidence_omitted: usize,
 }
 /// Checks integrity and summarizes existing evidence without devices, network or package mutation.
 pub fn analyze(root: &Path) -> Result<Analysis> {
@@ -187,6 +252,14 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
                 .into(),
         );
     }
+    if bundle.config.transport.is_impaired() {
+        observations.push(format!("observed: virtual faults enabled; intentionally dropped={}, duplicate copies={}, late arrivals={}, PLC slots={}, FEC attempts={}; injection selection is not proof of audible failure",
+            diagnostics.graph_statistics["transport"]["intentionally_dropped"],
+            diagnostics.graph_statistics["transport"]["duplicated_packets"],
+            diagnostics.graph_statistics["receive"]["late"],
+            diagnostics.graph_statistics["receive"]["concealed_packets"],
+            diagnostics.graph_statistics["receive"]["fec_attempts"]));
+    }
     if diagnostics.output_signal["discontinuity_candidates"]
         .as_u64()
         .unwrap_or(0)
@@ -196,6 +269,28 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
     }
     if bundle.manifest.reproduction == "metadata-only" {
         observations.push("unknown: source signal absent; exact signal replay needs the original hash-matching input".into());
+    }
+    let mut evidence = Vec::new();
+    let mut evidence_omitted = 0;
+    for event in &bundle.trace {
+        let flags = evidence_flags(event);
+        if flags.is_empty() {
+            continue;
+        }
+        if evidence.len() == 64 {
+            evidence_omitted += 1;
+            continue;
+        }
+        evidence.push(Evidence {
+            ordinal: event.ordinal,
+            stage: event.stage.clone(),
+            time_ns: event.time_ns,
+            time_clock_domain: event.time_clock_domain.clone(),
+            clock_domain: event.clock_domain.clone(),
+            first_frame: event.first_frame,
+            frames: event.frames,
+            flags,
+        });
     }
     Ok(Analysis {
         schema_version: 1,
@@ -208,6 +303,8 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
         trace_events_dropped: diagnostics.trace_events_dropped,
         observations,
         build_changed: build_changed(&bundle.manifest),
+        evidence,
+        evidence_omitted,
     })
 }
 /// Re-executes a validated signal scenario, preserving original config in a new directory.

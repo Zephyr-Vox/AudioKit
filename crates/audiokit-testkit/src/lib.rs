@@ -20,12 +20,16 @@ mod config;
 mod io;
 mod report;
 mod runner;
-pub use bundle::{Analysis, Comparison, analyze, compare, replay};
+mod sweep;
+mod transport;
+pub use bundle::{Analysis, Comparison, Evidence, analyze, compare, replay};
 pub use config::{
     ExecutionPlan, NodeStatus, NoiseLevel, ProcessingConfig, RunConfig, Scenario, Stage,
 };
 pub use report::{Artifact, Check, Diagnostics, Manifest, ReplayOrigin, TraceEvent};
 pub use runner::{Cancellation, ProgressEvent, run};
+pub use sweep::{SweepCase, SweepMatrix, SweepReport, sweep};
+pub use transport::TransportConfig;
 
 /// Typed worker failure; frontends map variants to stable exit codes.
 #[derive(Debug, thiserror::Error)]

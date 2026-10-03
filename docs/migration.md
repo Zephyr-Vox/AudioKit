@@ -62,8 +62,10 @@ clocks. Inferred arrival clocks are not synchronized remote capture timestamps.
 The first A5 slice now provides the shared testkit, file-processing/real-codec
 virtual-roundtrip runner, diagnostic bundle v1 and headless CLI analysis/replay/compare.
 CaptureGraph delegates its PCM frontend to CapturePcmGraph, so partial-chain tests
-do not need a dummy encoder or duplicate DSP. Slint, device-probe migration, packet
-trace replay, fault injection and parameter sweeps remain pending. See `testkit.md`.
+do not need a dummy encoder or duplicate DSP. The next slice adds deterministic
+virtual loss/jitter/reorder/duplicate/forwarding-stall and bounded serial parameter
+sweeps. Slint, device-probe migration, external packet trace replay, mix-stress and
+independent clock-drift simulation remain pending. See `testkit.md`.
 A6 still needs agent/TUI production device/scheduler
 switching, bounded legacy codec-map removal and hardware/E2E verification. Native
 device-to-host timestamp mapping and AEC delay calibration are not yet certified.
@@ -94,3 +96,11 @@ produces byte-identical WAV with zero steady render gaps or decode failures.
 Logs and local bundles are under `target/validation/a5-20261003/`; the consuming
 CLI log is `../CLIClient/target/audiokit-a5-cli.log`. No native devices or server
 were opened for this A5 validation; it does not complete A6.
+
+The fault/sweep slice passes 103 unit/integration tests plus one doctest, strict
+all-feature/headless Clippy and Rustdoc. Logs are
+`target/validation/a5-20261003/fault-sweep-tests.log` and
+`fault-sweep-headless.log`. Release clean WAV stays byte-identical to the previous
+slice; deterministic fault replay also matches. Local fault/sweep bundles in that
+directory record actual receiver late/duplicate/FEC/PLC outcomes, not just injected
+selections. This changes no production DSP/defaults and opens no native devices.

@@ -35,7 +35,13 @@ pub(crate) fn write_new(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    write_new(path, &serde_json::to_vec_pretty(value)?)
+    let data = serde_json::to_vec_pretty(value)?;
+    if data.len() as u64 > JSON_LIMIT {
+        return Err(Error::Execution(
+            "JSON artifact exceeds hard byte limit".into(),
+        ));
+    }
+    write_new(path, &data)
 }
 
 pub(crate) fn wav(data: &[u8], max_samples: usize) -> Result<(AudioFormat, Vec<f32>)> {

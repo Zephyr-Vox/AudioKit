@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "jitter_targets_ms": [40, 80, 120],
+  "max_cases": 3,
+  "max_input_duration_ms": 10000,
+  "max_total_output_samples": 6000000,
+  "max_total_artifact_bytes": 536870912
+}

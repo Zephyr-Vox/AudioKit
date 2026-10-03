@@ -77,8 +77,9 @@ cargo run -p audiokit --release --example render_budget --offline
 
 See `docs/host-integration.md` for worker ownership and timing contracts.
 The first A5 testkit/CLI slice is available; see `docs/testkit.md` for file scenarios,
-diagnostic bundle export, integrity checks, analysis and signal replay. Slint, native
-device scenarios, fault injection and the server host bridge are still pending.
+diagnostic bundle export, integrity checks, analysis, signal replay, deterministic
+virtual forwarding faults and bounded serial sweeps. Slint, native device scenarios,
+external packet replay, mix-stress and the server host bridge are still pending.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
 is implied by the deterministic tests in this workspace.
@@ -89,6 +90,7 @@ is implied by the deterministic tests in this workspace.
 cargo run -p audiokit-test --release --offline --locked -- list-scenarios --json
 cargo run -p audiokit-test --release --offline --locked -- run --config configs/desktop-roundtrip.json --input /path/to/input.wav --out-dir target/desktop-001 --quiet
 cargo run -p audiokit-test --release --offline --locked -- analyze --bundle target/desktop-001 --json
+cargo run -p audiokit-test --release --offline --locked -- sweep --config configs/voice-faults.json --matrix configs/jitter-sweep.json --input /path/to/voice-3s.wav --out-dir target/sweep-001 --quiet
 ```
 
 Output is float32 WAV plus a versioned diagnostic bundle. Source audio is not

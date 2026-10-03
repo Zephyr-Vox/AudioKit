@@ -60,6 +60,437 @@ fn bypass() -> RunConfig {
     config.processing.enabled = false;
     config
 }
+
+#[test]
+fn fault_configuration_and_sweep_axes_reject_uncovered_or_unbounded_work() {
+    use audiokit_testkit::{SweepMatrix, TransportConfig};
+    let mut config = bypass();
+    config.transport.delay_ms = 1;
+    assert!(config.validate().is_err());
+    for transport in [
+        TransportConfig {
+            loss_per_mille: 1001,
+            ..Default::default()
+        },
+        TransportConfig {
+            max_pending_packets: 4097,
+            ..Default::default()
+        },
+        TransportConfig {
+            reorder_every: 2,
+            ..Default::default()
+        },
+        TransportConfig {
+            stall_start_ms: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(transport.validate().is_err());
+    }
+    config = bypass();
+    assert!(
+        SweepMatrix {
+            bitrates_bps: vec![64_000],
+            ..Default::default()
+        }
+        .expand(&config)
+        .is_err()
+    );
+    assert!(
+        SweepMatrix {
+            noise_levels: vec![audiokit_testkit::NoiseLevel::Low],
+            ..Default::default()
+        }
+        .expand(&config)
+        .is_err()
+    );
+    assert!(
+        SweepMatrix {
+            max_total_output_samples: 1,
+            ..Default::default()
+        }
+        .expand(&config)
+        .is_err()
+    );
+    config.max_pcm_samples = usize::MAX;
+    assert!(SweepMatrix::default().expand(&config).is_err());
+}
+
+#[test]
+fn sweep_budget_preflight_and_cancellation_never_overwrite_results() {
+    use audiokit_testkit::{SweepMatrix, sweep};
+    let fixture = Fixture::new();
+    let source = fixture.input(48_000, 1, 1001);
+    let mut config = bypass();
+    config.max_pcm_samples = 2000;
+    let matrix = SweepMatrix::default();
+    let output = fixture.path("sweep");
+    let result = sweep(
+        &config,
+        &matrix,
+        &source,
+        &output,
+        &Cancellation::default(),
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.cases.len(), 1);
+    assert!(
+        analyze(&output.join("case-000"))
+            .unwrap()
+            .recorded_checks_passed
+    );
+    let original = fs::read(output.join("sweep.json")).unwrap();
+    assert!(
+        sweep(
+            &config,
+            &matrix,
+            &source,
+            &output,
+            &Cancellation::default(),
+            |_, _| {}
+        )
+        .is_err()
+    );
+    assert_eq!(original, fs::read(output.join("sweep.json")).unwrap());
+    let too_small = SweepMatrix {
+        max_total_artifact_bytes: 1024,
+        ..Default::default()
+    };
+    assert!(
+        sweep(
+            &config,
+            &too_small,
+            &source,
+            &fixture.path("budget"),
+            &Cancellation::default(),
+            |_, _| {}
+        )
+        .is_err()
+    );
+    assert!(!fixture.path("budget").exists());
+    let too_short = SweepMatrix {
+        max_input_duration_ms: 1,
+        ..Default::default()
+    };
+    assert!(
+        sweep(
+            &config,
+            &too_short,
+            &source,
+            &fixture.path("duration"),
+            &Cancellation::default(),
+            |_, _| {}
+        )
+        .is_err()
+    );
+    assert!(!fixture.path("duration").exists());
+    let stop = Cancellation::default();
+    stop.cancel();
+    let result = sweep(
+        &config,
+        &matrix,
+        &source,
+        &fixture.path("cancel"),
+        &stop,
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(result.exit_code, 130);
+    assert!(result.cases.is_empty());
+    assert!(fixture.path("cancel/base-config.json").is_file());
+    assert!(!result.source_digest.is_empty());
+    assert_eq!(
+        json(&fixture.path("cancel/sweep.json"))["status"],
+        "cancelled"
+    );
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn injected_loss_jitter_reorder_stall_is_reproducible_even_with_truncated_trace() {
+    let fixture = Fixture::new();
+    let source = fixture.input(48_000, 1, 96_000);
+    let mut config = bypass();
+    config.scenario = Scenario::FileRoundtrip;
+    config.retain_input = true;
+    config.max_trace_events = 1;
+    config.transport = audiokit_testkit::TransportConfig {
+        seed: 233,
+        delay_ms: 20,
+        jitter_ms: 15,
+        loss_per_mille: 200,
+        duplicate_per_mille: 100,
+        reorder_every: 7,
+        reorder_delay_ms: 100,
+        stall_start_ms: 600,
+        stall_duration_ms: 200,
+        ..Default::default()
+    };
+    let first = run(
+        &config,
+        &source,
+        &fixture.path("first"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    let stats = &first.graph_statistics;
+    assert!(
+        stats["transport"]["intentionally_dropped"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(stats["transport"]["stalled_packets"].as_u64().unwrap() > 0);
+    assert!(
+        stats["transport"]["reorder_selected_packets"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(stats["transport"]["pending_copies"], 0);
+    assert!(
+        stats["receive"]["concealed_packets"].as_u64().unwrap()
+            + stats["receive"]["fec_attempts"].as_u64().unwrap()
+            > 0
+    );
+    assert!(
+        first
+            .checks
+            .iter()
+            .find(|c| c.id == "transport_accounting")
+            .unwrap()
+            .passed
+    );
+    assert!(
+        !first
+            .checks
+            .iter()
+            .any(|c| c.id == "lossless_virtual_transport")
+    );
+    assert!(first.trace_events_dropped > 0);
+    let second = replay(
+        &fixture.path("first"),
+        None,
+        &fixture.path("second"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        first.graph_statistics["transport"],
+        second.graph_statistics["transport"]
+    );
+    assert!(
+        compare(&fixture.path("first"), &fixture.path("second"))
+            .unwrap()
+            .same_output_bytes
+    );
+    assert!(
+        analyze(&fixture.path("first"))
+            .unwrap()
+            .observations
+            .iter()
+            .any(|s| s.contains("virtual faults enabled"))
+    );
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn duplicates_do_not_advance_decoder_and_all_loss_is_not_healthy_media() {
+    let fixture = Fixture::new();
+    let source = fixture.input(48_000, 1, 96_000);
+    let mut config = bypass();
+    config.scenario = Scenario::FileRoundtrip;
+    config.transport.duplicate_per_mille = 1000;
+    let duplicate = run(
+        &config,
+        &source,
+        &fixture.path("duplicate"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        duplicate.graph_statistics["receive"]["decoded_packets"],
+        duplicate.graph_statistics["capture"]["packets"]
+    );
+    assert_eq!(
+        duplicate.graph_statistics["receive"]["duplicates"],
+        duplicate.graph_statistics["capture"]["packets"]
+    );
+    assert!(duplicate.checks.iter().all(|c| c.passed));
+    let analysis = analyze(&fixture.path("duplicate")).unwrap();
+    assert_eq!(analysis.evidence.len(), 64);
+    assert!(analysis.evidence_omitted > 0);
+    assert!(
+        analysis
+            .evidence
+            .iter()
+            .any(|event| event.stage == "transport_arrival"
+                && event.flags.contains(&"receiver_duplicate".into()))
+    );
+    assert!(
+        analysis
+            .evidence
+            .iter()
+            .all(|event| event.clock_domain == "capture_output")
+    );
+    config.transport.loss_per_mille = 1000;
+    let lost = run(
+        &config,
+        &source,
+        &fixture.path("lost"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert_eq!(lost.graph_statistics["receive"]["decoded_packets"], 0);
+    let analysis = analyze(&fixture.path("lost")).unwrap();
+    assert!(
+        analysis
+            .evidence
+            .iter()
+            .all(|event| event.flags.contains(&"injection_drop".into()))
+    );
+    assert!(
+        !lost
+            .checks
+            .iter()
+            .find(|c| c.id == "received_media")
+            .unwrap()
+            .passed
+    );
+    assert!(
+        !analyze(&fixture.path("lost"))
+            .unwrap()
+            .recorded_checks_passed
+    );
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn transport_queue_failure_and_cancel_preserve_pending_evidence() {
+    let fixture = Fixture::new();
+    let source = fixture.input(48_000, 1, 9600);
+    let mut config = bypass();
+    config.scenario = Scenario::FileRoundtrip;
+    config.transport.delay_ms = 200;
+    config.transport.max_pending_packets = 1;
+    let error = run(
+        &config,
+        &source,
+        &fixture.path("budget"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(error.exit_code(), 4);
+    assert_eq!(
+        json(&fixture.path("budget/diagnostics.json"))["graph_statistics"]["transport"]["pending_copies"],
+        1
+    );
+    assert!(analyze(&fixture.path("budget")).is_ok());
+    config.transport.max_pending_packets = 1024;
+    let stop = Cancellation::default();
+    let cancel = stop.clone();
+    let error = run(&config, &source, &fixture.path("cancel"), &stop, |event| {
+        if event.input_frames >= 4800 {
+            cancel.cancel();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(error.exit_code(), 130);
+    let stats = json(&fixture.path("cancel/diagnostics.json"));
+    assert!(
+        stats["graph_statistics"]["transport"]["pending_copies"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(stats["status"], "cancelled");
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn cartesian_sweep_is_serial_and_checks_all_cases_before_creating_output() {
+    use audiokit_testkit::{SweepMatrix, sweep};
+    let fixture = Fixture::new();
+    let source = fixture.input(48_000, 1, 9600);
+    let mut config = bypass();
+    config.scenario = Scenario::FileRoundtrip;
+    config.max_pcm_samples = 48_000;
+    let matrix = SweepMatrix {
+        bitrates_bps: vec![64_000, 96_000],
+        ptimes: vec![PacketDuration::Ms10, PacketDuration::Ms20],
+        ..Default::default()
+    };
+    let configs = matrix.expand(&config).unwrap();
+    assert_eq!(configs.len(), 4);
+    assert_eq!(configs[0].ptime, PacketDuration::Ms10);
+    assert_eq!(configs[1].ptime, PacketDuration::Ms20);
+    assert_eq!(configs[2].bitrate_bps, 96_000);
+    let result = sweep(
+        &config,
+        &matrix,
+        &source,
+        &fixture.path("sweep"),
+        &Cancellation::default(),
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.cases.len(), 4);
+    for case in &result.cases {
+        assert!(
+            analyze(&fixture.path("sweep").join(&case.bundle))
+                .unwrap()
+                .recorded_checks_passed
+        );
+    }
+    let invalid = SweepMatrix {
+        ptimes: vec![PacketDuration::Ms20],
+        bitrates_bps: vec![96_000, 320_000],
+        ..Default::default()
+    };
+    assert!(
+        sweep(
+            &config,
+            &invalid,
+            &source,
+            &fixture.path("invalid"),
+            &Cancellation::default(),
+            |_, _| {}
+        )
+        .is_err()
+    );
+    assert!(!fixture.path("invalid").exists());
+    let too_many = SweepMatrix {
+        max_cases: 3,
+        ..matrix.clone()
+    };
+    assert!(too_many.expand(&config).is_err());
+    let stop = Cancellation::default();
+    let cancel = stop.clone();
+    let result = sweep(
+        &config,
+        &matrix,
+        &source,
+        &fixture.path("partial"),
+        &stop,
+        |case, _| {
+            if case == 0 {
+                cancel.cancel();
+            }
+        },
+    )
+    .unwrap();
+    assert_eq!(result.exit_code, 130);
+    assert_eq!(result.cases.len(), 1);
+    assert!(analyze(&fixture.path("partial/case-000")).is_ok());
+}
 fn json(path: &Path) -> serde_json::Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }

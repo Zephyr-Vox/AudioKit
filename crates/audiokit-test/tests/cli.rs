@@ -71,17 +71,69 @@ fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
     assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 2);
     assert_eq!(value(&output)["capabilities"]["gui"], false);
     assert_eq!(value(&output)["capabilities"]["devices"], false);
-    for cmd in ["--gui", "devices", "sweep"] {
+    assert_eq!(value(&output)["capabilities"]["sweep"], true);
+    for cmd in ["--gui", "devices"] {
         let output = execute(&[cmd]);
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value(&output)["exit_code"], 3);
     }
+}
+
+#[test]
+fn headless_sweep_produces_json_summary_and_individual_replayable_bundles() {
+    let fixture = Fixture::new();
+    let source = fixture.input();
+    let config = fixture.config();
+    let matrix = fixture.path("matrix.json");
+    fs::write(&matrix, b"{}").unwrap();
+    let directory = fixture.path("sweep");
+    let output = execute(&[
+        "sweep",
+        "--input",
+        source.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--matrix",
+        matrix.to_str().unwrap(),
+        "--out-dir",
+        directory.to_str().unwrap(),
+        "--quiet",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stderr.is_empty());
+    assert_eq!(value(&output)["planned_cases"], 1);
+    assert!(directory.join("sweep.json").is_file());
+    let output = execute(&[
+        "analyze",
+        "--bundle",
+        directory.join("case-000").to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    fs::write(&matrix, br#"{"max_cases":0}"#).unwrap();
+    let output = execute(&[
+        "sweep",
+        "--input",
+        source.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--matrix",
+        matrix.to_str().unwrap(),
+        "--out-dir",
+        fixture.path("bad-sweep").to_str().unwrap(),
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.path("bad-sweep").exists());
 }
 #[test]
 fn malformed_options_and_unknown_configs_use_exit_two() {
     for args in [
         &["run", "--wat"][..],
         &["analyze"][..],
+        &["sweep"][..],
         &["list-scenarios", "--json", "--json"][..],
         &["describe-scenario", "bad"][..],
     ] {

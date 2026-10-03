@@ -1,6 +1,7 @@
 //! Headless frontend for the shared AudioKit runner; GUI and devices are not implemented yet.
 use audiokit_testkit::{
-    Cancellation, Error, RunConfig, Scenario, analyze, compare, plan_file, replay, run,
+    Cancellation, Error, RunConfig, Scenario, SweepMatrix, analyze, compare, plan_file, replay,
+    run, sweep,
 };
 use serde_json::{Value, json};
 use std::{
@@ -19,6 +20,7 @@ const HELP: &str = "AudioKit debugging CLI (initial offline suite)
   analyze --bundle DIR [--json]
   replay --bundle DIR --out-dir NEW_DIR [--input ORIGINAL_WAV] [--quiet]
   compare --baseline DIR --candidate DIR [--json]
+  sweep --input WAV --matrix FILE --out-dir NEW_DIR [--config FILE] [--retain-input] [--quiet]
 All results are JSON on stdout; progress is on stderr. Input retention is opt-in.
 Only WAV PCM16/24/32 and float32 mono/stereo are supported. No devices/network/GUI.
 Exit: 0 checks pass, 1 checks fail, 2 invalid arguments, 3 unavailable capability,
@@ -131,7 +133,7 @@ fn execute() -> Result<(Value, i32), Error> {
         "list-scenarios" => {
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"devices":false,"gui":false,"server_e2e":false}}),
+                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"sweep":true,"devices":false,"gui":false,"server_e2e":false}}),
                 0,
             ))
         }
@@ -224,7 +226,39 @@ fn execute() -> Result<(Value, i32), Error> {
                 0,
             ))
         }
-        "--gui" | "devices" | "sweep" => Err(Error::Capability(format!(
+        "sweep" => {
+            let opts = Options::parse(
+                args,
+                &[
+                    "--config",
+                    "--matrix",
+                    "--input",
+                    "--out-dir",
+                    "--retain-input",
+                    "--quiet",
+                    "--json",
+                ],
+            )?;
+            let file = std::fs::File::open(opts.required("--matrix")?)?;
+            let mut data = Vec::new();
+            file.take(1_048_577).read_to_end(&mut data)?;
+            if data.len() > 1_048_576 {
+                return Err(Error::Invalid("matrix exceeds 1 MiB".into()));
+            }
+            let matrix: SweepMatrix = serde_json::from_slice(&data)?;
+            let mut on_progress = progress(opts.flag("--quiet"));
+            let result = sweep(
+                &opts.config()?,
+                &matrix,
+                &opts.required("--input")?,
+                &opts.required("--out-dir")?,
+                &stop_token()?,
+                |_, event| on_progress(event),
+            )?;
+            let code = result.exit_code;
+            Ok((serde_json::to_value(result)?, code))
+        }
+        "--gui" | "devices" => Err(Error::Capability(format!(
             "{command} is planned but not implemented"
         ))),
         _ => Err(Error::Invalid("unknown command; use --help".into())),

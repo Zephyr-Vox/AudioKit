@@ -3,8 +3,9 @@
 The first A5 slice is implemented: a reusable `audiokit-testkit` library and the
 headless `audiokit-test` application. CLI is for automation, reproduction and
 evidence analysis. Slint will provide the human E2E/recording/listening/export
-workbench on the same runner. GUI, real devices, packet-trace replay, fault
-injection, parameter sweeps and host/server E2E are **not implemented here yet**.
+workbench on the same runner. Deterministic virtual packet faults and serial
+parameter sweeps are implemented. GUI, real devices, external packet-trace replay,
+mix-stress, independent clock drift and host/server E2E are **not implemented yet**.
 There is no arbitrary node-connection editor or selectable endpoint range yet.
 
 ## Production Coverage
@@ -24,6 +25,79 @@ drain; extra ordinary callbacks after EOF would manufacture PLC. Receive paramet
 include the production source/master limiter, activity mix, gain, resampling,
 jitter and clock controls. Mono voice expands to the configured render channels.
 This is a **virtual roundtrip**, not a microphone, soundcard or server test.
+
+## Virtual Forwarding Faults
+
+Roundtrip `transport` config accepts fixed delay, independent nonnegative delay
+jitter, loss/duplicate probability in per-mille, delay of every Nth original and
+one scheduled forwarding pause. These operate on actual Opus payloads and original
+wrapping sequences. SHA256 draws keyed by seed/packet ordinal/domain provide
+portable deterministic decisions; source DSP is unchanged. The default transport
+is immediate and lossless. PCM-only scenarios reject enabled transport faults.
+
+Reorder selection delays a packet; it does not guarantee observed reordering if
+the delay is too small or surrounding packets are lost. Duplicate copies arrive
+after the original at the same simulated timestamp. A pause holds deliveries due
+inside its interval until its end, without pausing capture or render callbacks.
+This is network/forwarder stall, not a DSP-worker or output-callback stall.
+There is no simulated capture/render clock drift yet.
+
+The pending-copy cap (default 1024, hard 4096) fails explicitly before queue
+mutation. Normal demand continues after capture EOF only while packets remain
+in flight, then the receiver explicitly drains. Trailing loss cannot be inferred
+without a following sequence or explicit remote media-end protocol. No extra
+demand is invented to count trailing loss as PLC.
+
+`transport_schedule` records emission/selection/drop/due time and the encoded
+sample range. `transport_arrival` records original ordinal, sequence, copy kind,
+scheduled delay, receiver admission outcome and observing callback time. Arrival
+timestamps are simulated host nanoseconds; callbacks observe arrivals at 10 ms
+resolution. Payloads are not included in trace. Original/drop/copy/delivery/pending
+totals survive trace truncation. Virtual delay is not measured server latency.
+
+```powershell
+.\target\release\audiokit-test.exe run --config configs\voice-faults.json --input "C:\Audio\voice-3s.wav" --out-dir target\fault-001 --quiet
+.\target\release\audiokit-test.exe analyze --bundle target\fault-001 --json
+```
+
+The example bypasses APM to isolate receiver behavior. Fault runs still check
+finite output, media received, decoder errors, transport accounting, render gaps
+and sample ceiling. A lossless expectation applies only to unimpaired transport.
+Check failures return 1 with a completed bundle, not a runner crash; 100% loss is
+not healthy media even though its silent PCM is finite. FEC attempts are not proof
+of successful recovery or encoded redundancy.
+
+Analysis includes at most 64 flagged retained intervals with stage/sample/time
+domains and flags, plus `evidence_omitted`. Injection selection is observed test
+input, not proof of an audible fault or its cause. Recorder loss and analysis
+truncation are separate; unrecorded intervals remain unknown.
+
+## Serial Parameter Matrix
+
+`sweep` uses the same runner, configuration validator and production factory.
+Typed Cartesian axes cover bitrates, ptimes, noise levels and encoded jitter
+startup targets. Empty axes retain the base setting. Uncovered codec/jitter axes
+and noise axes on bypassed APM are rejected. All combinations and actual graph
+construction are preflighted before creating the root directory.
+
+```powershell
+.\target\release\audiokit-test.exe sweep --config configs\voice-faults.json --matrix configs\jitter-sweep.json --input "C:\Audio\voice-3s.wav" --out-dir target\jitter-sweep-001 --quiet
+```
+
+The checked-in example compares 40/80/120 ms startup targets against identical
+fault decisions and the same immutable input snapshot. Maximum cases, input
+duration, sum of per-case output caps and conservative artifact reservation are
+bounded. Reservations include hard JSON caps, WAV caps and consented retained
+input per case; they can exceed actual output size substantially. They limit
+media/work/space, not OS execution wall time. Cases run serially, never in parallel.
+
+Each `case-000` directory is an ordinary independently analyzable/replayable
+bundle. `base-config.json` and `matrix.json` record the base controls and axes,
+even when cancelled before the first case. `sweep.json` records build identity, case IDs,
+check failures/errors, planned versus attempted cases, source hash and reservation.
+Partial runs/cancellation finalize available cases and the summary. No later
+case starts after cancellation; no output directory is overwritten. Disk failure
+can still prevent finalization. CLI returns the summary's exit code.
 
 ## Build and Run
 
@@ -145,7 +219,7 @@ All command results are versioned JSON on stdout; progress uses stderr. `--quiet
 suppresses progress. Exit codes: 0 recorded checks pass, 1 recorded checks fail,
 2 invalid arguments/config/input, 3 capability unavailable, 4 runtime/I/O failure,
 130 cancelled. `compare` is descriptive and returns 0 after successful comparison;
-callers decide whether its differences are acceptable. `devices`, `sweep` and
+callers decide whether its differences are acceptable. `devices` and
 `--gui` currently return capability-unavailable instead of pretending to run.
 
 ```powershell
@@ -166,3 +240,17 @@ and warning-as-error Rustdoc pass. A local 44.1 kHz stereo instrumental excerpt
 passed the Release desktop roundtrip with zero decoded failures or steady render
 gaps, and replay produced byte-identical output WAV. This is deterministic offline
 evidence, not a hardware timing or perceptual-quality certification.
+
+The next A5 slice adds deterministic faults, bounded evidence timelines and serial
+sweeps, with regressions for duplicate rejection, all-loss unhealthy media,
+fault replay equality, queue exhaustion, pending-copy cancellation, preflight
+budgets and whole-matrix validation. These are virtual receiver tests, not the
+external packet-trace scenario or the device migration.
+Validation now passes 103 workspace unit/integration tests plus one doctest.
+Release clean transport retains the first slice's exact output WAV. The local
+three-second instrumental fault run produced 151 originals, four injected drops,
+two duplicate copies, one late arrival, three PLC slots and two FEC attempts,
+with zero decoder errors and byte-identical replay. The 40/80/120 ms sweep recorded
+17/1/0 late arrivals and 5/2/0 PLC slots for the same fault decisions. These counts
+demonstrate the debugging workflow, not a recommendation to raise production
+buffers or a claim that FEC successfully recovered each missing packet.

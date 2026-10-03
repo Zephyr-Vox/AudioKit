@@ -396,6 +396,76 @@ fn prepare_roundtrip(config: &RunConfig, plan: &ExecutionPlan) -> Result<Roundtr
 }
 
 #[cfg(feature = "codec-opus")]
+fn schedule_packet(
+    packet: audiokit::graph::capture::CapturePacket,
+    sequence: u16,
+    now: u64,
+    transport: &mut crate::transport::scheduler::Transport,
+    config: &RunConfig,
+    plan: &ExecutionPlan,
+    work: &mut Work,
+) -> Result<()> {
+    work.packet(packet.payload.len());
+    let frames = u64::from(plan.capture_format.sample_rate_hz())
+        * u64::from(config.ptime.milliseconds())
+        / 1000;
+    work.event(
+        "encoded_out",
+        "capture_output",
+        now,
+        (packet.sample_position, frames),
+        json!({"sequence":sequence,"bytes":packet.payload.len()}),
+        config,
+    )?;
+    let decision = transport.schedule(packet.payload, sequence, packet.sample_position, now)?;
+    work.event(
+        "transport_schedule",
+        "capture_output",
+        now,
+        (packet.sample_position, frames),
+        json!(decision),
+        config,
+    )
+}
+
+#[cfg(feature = "codec-opus")]
+fn deliver_packets(
+    transport: &mut crate::transport::scheduler::Transport,
+    receive: &mut audiokit::graph::receive::ReceiveGraph,
+    source: audiokit::graph::render::SourceRegistration,
+    now: u64,
+    work: &mut Work,
+    config: &RunConfig,
+) -> Result<()> {
+    use audiokit::graph::receive::EncodedPacket;
+    while let Some(delivery) = transport.pop_due(now) {
+        let outcome = receive.push_packet(EncodedPacket {
+            source: source.key,
+            epoch: source.epoch,
+            sequence: delivery.sequence,
+            duration: config.ptime,
+            arrival_ns: delivery.due_ns,
+            payload: delivery.payload,
+        })?;
+        let frames = u64::from(source.format.sample_rate_hz())
+            * u64::from(config.ptime.milliseconds())
+            / 1000;
+        work.event(
+            "transport_arrival",
+            "capture_output",
+            delivery.due_ns,
+            (delivery.first_frame, frames),
+            json!({"packet_ordinal":delivery.ordinal,"sequence":delivery.sequence,
+                "duplicate_copy":delivery.duplicate,"emitted_ns":delivery.emitted_ns,
+                "delivery_delay_ns":delivery.due_ns-delivery.emitted_ns,"outcome":outcome,
+                "observed_by_callback_ns":now}),
+            config,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "codec-opus")]
 fn roundtrip(
     config: &RunConfig,
     plan: &ExecutionPlan,
@@ -405,7 +475,6 @@ fn roundtrip(
     work: &mut Work,
     graphs: Box<RoundtripGraphs>,
 ) -> Result<()> {
-    use audiokit::graph::receive::EncodedPacket;
     let RoundtripGraphs {
         mut capture,
         mut receive,
@@ -421,6 +490,7 @@ fn roundtrip(
     let total_frames = plan.input_format.frames_in(pcm.len())?.get();
     let mut now = 0_u64;
     let mut sequence = 0_u16;
+    let mut transport = crate::transport::scheduler::Transport::new(config.transport);
     let result = (|| {
         for (i, block) in pcm.chunks(block_samples).enumerate() {
             if stop.is_cancelled() {
@@ -433,30 +503,10 @@ fn roundtrip(
             let packets = capture.push_native(block);
             work.capture_execution.record(started);
             for packet in packets? {
-                work.packet(packet.payload.len());
-                work.event(
-                    "encoded_out",
-                    "capture_output",
-                    now,
-                    (
-                        packet.sample_position,
-                        u64::from(plan.capture_format.sample_rate_hz())
-                            * u64::from(config.ptime.milliseconds())
-                            / 1000,
-                    ),
-                    json!({"sequence": sequence, "bytes":packet.payload.len()}),
-                    config,
-                )?;
-                receive.push_packet(EncodedPacket {
-                    source: source.key,
-                    epoch: source.epoch,
-                    sequence,
-                    duration: config.ptime,
-                    arrival_ns: now,
-                    payload: packet.payload,
-                })?;
+                schedule_packet(packet, sequence, now, &mut transport, config, plan, work)?;
                 sequence = sequence.wrapping_add(1);
             }
+            deliver_packets(&mut transport, &mut receive, source, now, work, config)?;
             let started = Instant::now();
             let metrics = receive.render_into(&mut output, now);
             work.receive_execution.record(started);
@@ -483,19 +533,46 @@ fn roundtrip(
         let packets = capture.finish();
         work.capture_execution.record(started);
         for packet in packets? {
-            work.packet(packet.payload.len());
-            receive.push_packet(EncodedPacket {
-                source: source.key,
-                epoch: source.epoch,
-                sequence,
-                duration: config.ptime,
-                arrival_ns: now,
-                payload: packet.payload,
-            })?;
+            schedule_packet(packet, sequence, now, &mut transport, config, plan, work)?;
             sequence = sequence.wrapping_add(1);
         }
-        // EOF is explicit: drain buffered real packets and DSP tails, never run
-        // ordinary demand after the last arrival (which would manufacture PLC).
+        deliver_packets(&mut transport, &mut receive, source, now, work, config)?;
+        // Capture EOF is not network EOF: keep real demand while delayed packets
+        // are in flight. Only after the final scheduled copy is delivered may the
+        // receiver drain, avoiding artificial PLC beyond the transport's lifetime.
+        let mut waiting = 0;
+        while !transport.is_empty() {
+            if stop.is_cancelled() {
+                receive.abort();
+                return Err(Error::Cancelled);
+            }
+            waiting += 1;
+            if waiting > 1000 {
+                return Err(Error::Execution(
+                    "virtual transport drain deadline exceeded".into(),
+                ));
+            }
+            now += 10_000_000;
+            deliver_packets(&mut transport, &mut receive, source, now, work, config)?;
+            if transport.is_empty() {
+                break;
+            }
+            let started = Instant::now();
+            let metrics = receive.render_into(&mut output, now);
+            work.receive_execution.record(started);
+            let metrics = metrics?;
+            work.render_totals.observe(&metrics);
+            work.last_source_clocks = json!(receive.clock_metrics());
+            work.append(&output, config)?;
+            work.event(
+                "render_output",
+                "virtual_output",
+                now,
+                (metrics.sample_position, metrics.frames),
+                json!(metrics),
+                config,
+            )?;
+        }
         for _ in 0..1000 {
             if stop.is_cancelled() {
                 receive.abort();
@@ -519,7 +596,7 @@ fn roundtrip(
         ))
     })();
     let encoded_frames = capture.statistics().encoded_frames;
-    work.stats = json!({"capture":capture.statistics(), "receive":receive.statistics(), "last_steady_source_clocks":work.last_source_clocks, "steady_render":work.render_totals, "render_totals_scope":"ordinary demand only; drain metric API unavailable",
+    work.stats = json!({"capture":capture.statistics(), "receive":receive.statistics(), "transport":transport.statistics(), "last_steady_source_clocks":work.last_source_clocks, "steady_render":work.render_totals, "render_totals_scope":"ordinary demand only; drain metric API unavailable",
         "codec_payload":{"bytes":work.encoded_bytes,"packet_min_bytes":work.encoded_packet_min_bytes,"packet_max_bytes":work.encoded_packet_max_bytes,
         "observed_bitrate_bps":if encoded_frames == 0 {None} else {Some(work.encoded_bytes as f64 * 8.0 * f64::from(plan.capture_format.sample_rate_hz()) / encoded_frames as f64)},
         "method":"payload only over encoded media duration including EOF padding; VBR may differ from target; no transport headers"}});
@@ -612,15 +689,40 @@ pub(crate) fn run_bytes(
         checks.push(Check { id:"steady_render_no_missing_frames".into(), passed:work.render_totals.missing_frames == 0, detail:"ordinary render demand has no already-started source gaps; excludes startup and drain".into() });
         let receive = &work.stats["receive"];
         checks.push(Check {
-            id: "lossless_virtual_transport".into(),
-            passed: receive["decode_errors"] == 0
-                && receive["concealed_packets"] == 0
-                && receive["fec_attempts"] == 0
-                && receive["late"] == 0
-                && receive["resynchronizations"] == 0
-                && receive["decoded_packets"] == work.stats["capture"]["packets"],
-            detail: "all encoded packets decoded once; no injected loss, late/reset/FEC/PLC".into(),
+            id: "received_media".into(),
+            passed: receive["decoded_packets"].as_u64().unwrap_or(0) > 0,
+            detail: "at least one actual payload decoded; all-loss silence is not healthy media"
+                .into(),
         });
+        checks.push(Check {
+            id: "decoder_no_errors".into(),
+            passed: receive["decode_errors"] == 0,
+            detail: "production decoder did not report corrupt/backend failures".into(),
+        });
+        let transport = &work.stats["transport"];
+        checks.push(Check {
+            id: "transport_accounting".into(),
+            passed: transport["pending_copies"] == 0
+                && transport["original_packets"] == work.stats["capture"]["packets"]
+                && transport["original_packets"].as_u64().zip(transport["duplicated_packets"].as_u64())
+                    .map(|(original, duplicate)| original + duplicate)
+                    == transport["intentionally_dropped"].as_u64().zip(transport["delivered_copies"].as_u64())
+                        .map(|(dropped, delivered)| dropped + delivered),
+            detail: "all produced originals/copies either intentionally dropped or delivered; no pending tail".into(),
+        });
+        if !config.transport.is_impaired() {
+            checks.push(Check {
+                id: "lossless_virtual_transport".into(),
+                passed: receive["decode_errors"] == 0
+                    && receive["concealed_packets"] == 0
+                    && receive["fec_attempts"] == 0
+                    && receive["late"] == 0
+                    && receive["resynchronizations"] == 0
+                    && receive["decoded_packets"] == work.stats["capture"]["packets"],
+                detail: "all encoded packets decoded once; no injected loss, late/reset/FEC/PLC"
+                    .into(),
+            });
+        }
         let ceiling = 10_f64
             .powf(f64::from(config.receive.render.master_limiter.ceiling_dbfs) / 20.0)
             * 32768.0;
@@ -659,6 +761,7 @@ pub(crate) fn run_bytes(
             "packetization":{"classification":if config.scenario == Scenario::FileRoundtrip {"configured"} else {"not_covered"}, "ptime_ms":if config.scenario == Scenario::FileRoundtrip {Some(config.ptime.milliseconds())} else {None}, "reason":"not a constant per-sample end-to-end delay"},
             "encoded_startup":{"classification":if config.scenario == Scenario::FileRoundtrip {"configured"} else {"not_covered"}, "target_ms":if config.scenario == Scenario::FileRoundtrip {Some(config.receive.jitter.target_ms)} else {None}},
             "render_algorithms":{"classification":if config.scenario == Scenario::FileRoundtrip {"estimated"} else {"not_covered"}, "method":"production per-stage frame delays; no double-counted total", "clock":"virtual_output", "source_limiter_frames":work.render_totals.source_lookahead_frames, "master_limiter_frames":work.render_totals.master_lookahead_frames, "source_resampler_frames":work.render_totals.source_resampler_delay_frames},
+            "virtual_forwarding":{"classification":if config.scenario == Scenario::FileRoundtrip {"simulated"} else {"not_covered"}, "clock":"virtual_host", "max_delivery_delay_ns":work.stats["transport"]["max_delivery_delay_ns"], "method":"scheduled delivery time minus emission; not measured server/network latency; callback observation may be up to 10 ms later"},
             "device":{"classification":"unknown", "reason":"no devices opened"}, "server_forwarding":{"classification":"unknown", "reason":"no server in this scenario"},
             "end_to_end":{"classification":"unknown", "reason":"signal alignment and full render delay instrumentation pending; components are not summed"}}),
         checks,

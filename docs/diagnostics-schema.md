@@ -73,14 +73,36 @@ metrics are not in that aggregate. Last ordinary source-clock snapshot is retain
 before drain retires the source; it is inferred from virtual arrivals, not a
 measured remote device clock.
 
+Optional/defaulted `transport` controls add deterministic faults to file-roundtrip
+without changing its coverage level. `graph_statistics.transport` counts original
+packets, injected drops/duplicate copies, delivered/pending copies, queue high-water,
+reorder selections, stalled packets and maximum simulated delivery delay. A
+successful scheduler run conserves originals + duplicates = drops + deliveries,
+with no pending copies; failed/cancelled runs may retain pending evidence.
+Trace schedule/arrival records correlate packet ordinal, wrapping sequence and
+capture-output sample range. Injection selection is not a receiver outcome.
+Delivery timestamps use virtual host time, not measured server/network time.
+JSON artifacts have a hard 32 MiB serialized bound on both write and import.
+
 Latency records identify measured execution, estimated backend algorithmic frames,
 configured ptime/startup or unknown/not-covered/bypassed stages. Empty timing sets
 have null total/max, not a fabricated zero. p50/p95/p99 remain null until bounded
 histograms land. CPU durations exclude trace serialization, artifact I/O and
 post-run analysis. Device/server and aligned E2E delay are unknown. No sum is
 reported that double-counts parallel work, buffering or codec/group delays.
+`virtual_forwarding` uses classification `simulated`; its maximum is due time
+minus emission time, while callback observation is quantized to 10 ms. It does
+not replace unknown actual server/network measurements.
 
 `analyze` reports integrity-verified recorded checks and evidence limitations, not
 a root-cause certainty score. `compare` compares input/config/coverage/waveform/
 checks/build and preserves both original packages. Timing fields and run IDs are
 not compared as deterministic audio content.
+
+Analysis also returns a bounded `evidence` timeline (64 flagged retained intervals)
+and `evidence_omitted`. Stage, ordinal, sample range/time and their separate domains
+refer to actual recorded observations. Flags include injected drops/stall/reorder
+selections, non-accepted arrivals, source missing frames and master safety clamps.
+Observation order is not asserted causal order or first audible-defect location.
+Recorder loss remains a separate count. Sweep summaries are not run manifests:
+each case retains its own normal schema-1 diagnostic bundle and replay contract.
