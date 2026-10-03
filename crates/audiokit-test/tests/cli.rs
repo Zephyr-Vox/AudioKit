@@ -68,7 +68,7 @@ fn value(output: &Output) -> serde_json::Value {
 fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
     let output = execute(&["list-scenarios", "--json"]);
     assert!(output.status.success());
-    assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 2);
+    assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 3);
     assert_eq!(value(&output)["capabilities"]["gui"], false);
     assert_eq!(value(&output)["capabilities"]["devices"], false);
     assert_eq!(value(&output)["capabilities"]["sweep"], true);
@@ -127,6 +127,39 @@ fn headless_sweep_produces_json_summary_and_individual_replayable_bundles() {
     ]);
     assert_eq!(output.status.code(), Some(2));
     assert!(!fixture.path("bad-sweep").exists());
+}
+
+#[test]
+fn mix_stress_defaults_are_shared_and_run_without_optional_backends() {
+    let fixture = Fixture::new();
+    let input = fixture.input();
+    let output = execute(&["describe-scenario", "mix-stress", "--json"]);
+    assert!(output.status.success());
+    assert_eq!(
+        value(&output)["default_config"]["processing"]["enabled"],
+        false
+    );
+    assert_eq!(value(&output)["coverage"], "render-stress");
+    let output = execute(&[
+        "run",
+        "--scenario",
+        "mix-stress",
+        "--input",
+        input.to_str().unwrap(),
+        "--out-dir",
+        fixture.path("mix").to_str().unwrap(),
+        "--quiet",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(
+        value(&output)["graph_statistics"]["mix_stress"]["registered_sources"],
+        8
+    );
+    assert!(value(&output)["graph_statistics"]["receive"].is_null());
 }
 #[test]
 fn malformed_options_and_unknown_configs_use_exit_two() {

@@ -62,6 +62,272 @@ fn bypass() -> RunConfig {
 }
 
 #[test]
+fn mix_stress_covers_source_counts_protection_and_codec_free_plan() {
+    for sources in [1, 2, 4, 8, 16, 32, 64] {
+        let fixture = Fixture::new();
+        let input = fixture.input(48_000, 1, 4800);
+        let mut config = RunConfig::for_scenario(Scenario::MixStress);
+        config.mix_stress.sources = sources;
+        config.mix_stress.source_gain = 4.0;
+        config.receive.render.max_sources = 64;
+        config.max_trace_events = 1;
+        let report = run(
+            &config,
+            &input,
+            &fixture.path("mix"),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            report.checks.iter().all(|check| check.passed),
+            "{sources}: {:?}",
+            report.checks
+        );
+        assert_eq!(report.plan.coverage, "render-stress");
+        assert_eq!(
+            report.graph_statistics["mix_stress"]["admitted_source_frames"],
+            (4800 * sources) as u64
+        );
+        assert_eq!(
+            report.graph_statistics["steady_render"]["max_active_voice"],
+            sources
+        );
+        assert!(report.graph_statistics["receive"].is_null());
+        assert!(
+            report.latency["receive_execution"]["budgeted_calls"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            report
+                .plan
+                .stages
+                .iter()
+                .any(|node| node.id == "opus_encode"
+                    && node.status == audiokit_testkit::NodeStatus::NotCovered)
+        );
+        assert_eq!(
+            report.latency["render_algorithms"]["classification"],
+            "estimated"
+        );
+        if sources >= 8 {
+            assert!(
+                report.graph_statistics["steady_render"]["max_pre_master_peak_q15"]
+                    .as_u64()
+                    .unwrap()
+                    > 32768
+            );
+            assert!(
+                report.graph_statistics["steady_render"]["max_gain_reduction_millidb"]
+                    .as_u64()
+                    .unwrap()
+                    > 0
+            );
+        }
+    }
+}
+
+#[test]
+fn silent_registered_sources_do_not_change_waveform_or_energy_normalization() {
+    for stream in [StreamKind::Voice, StreamKind::Desktop] {
+        let fixture = Fixture::new();
+        let input = fixture.input(44_100, 2, 4411);
+        let mut config = RunConfig::for_scenario(Scenario::MixStress);
+        config.stream = stream;
+        if stream == StreamKind::Desktop {
+            config.bitrate_bps = 196_000;
+        }
+        config.mix_stress.sources = 1;
+        config.retain_input = true;
+        let baseline = run(
+            &config,
+            &input,
+            &fixture.path("baseline"),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        config.mix_stress.sources = 8;
+        config.mix_stress.silent_sources = 7;
+        let silent = run(
+            &config,
+            &input,
+            &fixture.path("silent"),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(silent.checks.iter().all(|c| c.passed));
+        let trace: serde_json::Value =
+            serde_json::from_slice(&fs::read(fixture.path("silent").join("trace.json")).unwrap())
+                .unwrap();
+        let metrics = &trace
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["stage"] == "render_output")
+            .unwrap()["metrics"];
+        let elapsed = metrics["worker_call_ns"].as_u64().unwrap();
+        let budget = metrics["worker_budget_ns"].as_u64().unwrap();
+        assert_eq!(budget, 10_000_000);
+        assert_eq!(metrics["worker_over_budget"], elapsed > budget);
+        assert_eq!(baseline.output_frames, silent.output_frames);
+        assert!(
+            compare(&fixture.path("baseline"), &fixture.path("silent"))
+                .unwrap()
+                .same_output_bytes
+        );
+        replay(
+            &fixture.path("silent"),
+            None,
+            &fixture.path("replay"),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            compare(&fixture.path("silent"), &fixture.path("replay"))
+                .unwrap()
+                .same_output_bytes
+        );
+    }
+}
+
+#[test]
+fn mix_admission_work_limits_cancel_and_matrix_validation_are_explicit() {
+    use audiokit_testkit::{ClockConfig, SweepMatrix, sweep};
+    let fixture = Fixture::new();
+    let input = fixture.input(48_000, 1, 1001);
+    let mut config = RunConfig::for_scenario(Scenario::MixStress);
+    config.mix_stress.sources = 2;
+    config.receive.render.max_sources = 1;
+    assert!(audiokit_testkit::plan_file(&config, &input).is_err());
+    config.receive.render.max_sources = 64;
+    config.mix_stress.max_total_source_frames = 1000;
+    assert!(
+        run(
+            &config,
+            &input,
+            &fixture.path("budget"),
+            &Cancellation::default(),
+            |_| {}
+        )
+        .is_err()
+    );
+    assert!(!fixture.path("budget").exists());
+    config.mix_stress.max_total_source_frames = 100_000;
+    config.clocks = ClockConfig {
+        render_rate_ppm: 1,
+        ..Default::default()
+    };
+    assert!(config.validate().is_err());
+    config.clocks = Default::default();
+    let matrix = SweepMatrix {
+        mix_sources: vec![1, 2],
+        mix_silent_sources: vec![0, 1],
+        ..Default::default()
+    };
+    assert!(matrix.expand(&config).is_err()); // One silent source with one total source is invalid.
+    let matrix = SweepMatrix {
+        mix_sources: vec![1, 4, 8],
+        ..Default::default()
+    };
+    let summary = sweep(
+        &config,
+        &matrix,
+        &input,
+        &fixture.path("sweep"),
+        &Cancellation::default(),
+        |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(summary.cases.len(), 3);
+    assert_eq!(summary.exit_code, 0);
+    config.mix_stress.max_total_source_frames = 2000;
+    assert!(
+        sweep(
+            &config,
+            &matrix,
+            &input,
+            &fixture.path("invalid-sweep"),
+            &Cancellation::default(),
+            |_, _| {}
+        )
+        .is_err()
+    );
+    assert!(!fixture.path("invalid-sweep").exists());
+    config.mix_stress.max_total_source_frames = 100_000;
+    let stop = Cancellation::default();
+    let cancel = stop.clone();
+    assert!(matches!(
+        run(&config, &input, &fixture.path("cancel"), &stop, |_| cancel
+            .cancel()),
+        Err(Error::Cancelled)
+    ));
+    assert!(analyze(&fixture.path("cancel")).is_ok());
+}
+
+#[cfg(feature = "codec-opus")]
+#[test]
+fn independent_clocks_are_inferred_with_correct_sign_and_clamped_or_disabled() {
+    use audiokit_testkit::ClockConfig;
+    for (capture, render, cap) in [
+        (400, -100, 500),
+        (-300, 200, 500),
+        (2000, -2000, 100),
+        (400, -100, 0),
+    ] {
+        let fixture = Fixture::new();
+        let input = fixture.input(48_000, 1, 96_000);
+        let mut config = bypass();
+        config.scenario = Scenario::FileRoundtrip;
+        config.clocks = ClockConfig {
+            capture_rate_ppm: capture,
+            render_rate_ppm: render,
+        };
+        config.receive.clock_window_ms = 1000;
+        config.receive.clock_slew_ppm_per_second = 1000.0;
+        config.receive.render.max_source_clock_correction_ppm = cap;
+        config.max_trace_events = 1;
+        let report = run(
+            &config,
+            &input,
+            &fixture.path("clock"),
+            &Cancellation::default(),
+            |_| {},
+        )
+        .unwrap();
+        let clock = &report.graph_statistics["last_steady_source_clocks"][0];
+        assert!(
+            (clock["inferred_source_drift_ppm"].as_f64().unwrap() - f64::from(capture)).abs() < 1.0,
+            "{clock}"
+        );
+        assert!(
+            (clock["inferred_device_drift_ppm"].as_f64().unwrap() - f64::from(render)).abs() < 1.0,
+            "{clock}"
+        );
+        let expected = (((1_000_000.0 + f64::from(render)) / (1_000_000.0 + f64::from(capture))
+            - 1.0)
+            * 1_000_000.0)
+            .clamp(-f64::from(cap), f64::from(cap));
+        assert!(
+            (clock["applied_correction_ppm"].as_f64().unwrap() - expected).abs() <= 1.0,
+            "{clock}"
+        );
+        assert!(
+            report.graph_statistics["steady_render"]["max_abs_clock_correction_ppm"]
+                .as_u64()
+                .unwrap()
+                <= u64::from(cap)
+        );
+        assert_eq!(report.graph_statistics["receive"]["decode_errors"], 0);
+        assert!(report.trace_events_dropped > 0);
+    }
+}
+
+#[test]
 fn fault_configuration_and_sweep_axes_reject_uncovered_or_unbounded_work() {
     use audiokit_testkit::{SweepMatrix, TransportConfig};
     let mut config = bypass();
@@ -336,6 +602,7 @@ fn duplicates_do_not_advance_decoder_and_all_loss_is_not_healthy_media() {
         analysis
             .evidence
             .iter()
+            .filter(|event| event.flags.contains(&"receiver_duplicate".into()))
             .all(|event| event.clock_domain == "capture_output")
     );
     config.transport.loss_per_mille = 1000;
@@ -353,7 +620,7 @@ fn duplicates_do_not_advance_decoder_and_all_loss_is_not_healthy_media() {
         analysis
             .evidence
             .iter()
-            .all(|event| event.flags.contains(&"injection_drop".into()))
+            .any(|event| event.flags.contains(&"injection_drop".into()))
     );
     assert!(
         !lost

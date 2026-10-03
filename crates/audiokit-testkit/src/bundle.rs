@@ -189,6 +189,9 @@ fn evidence_flags(event: &TraceEvent) -> Vec<String> {
         flags.push(format!("receiver_{outcome}"));
     }
     if event.stage == "render_output" {
+        if metrics["worker_over_budget"] == true {
+            flags.push("worker_budget_overrun".into());
+        }
         if metrics["sources"].as_array().is_some_and(|sources| {
             sources
                 .iter()
@@ -259,6 +262,16 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
             diagnostics.graph_statistics["receive"]["late"],
             diagnostics.graph_statistics["receive"]["concealed_packets"],
             diagnostics.graph_statistics["receive"]["fec_attempts"]));
+    }
+    if bundle.config.clocks.is_shifted() {
+        observations.push(format!("observed: simulated capture/render rates are {}/{} ppm; final inferred source clocks={}; real device clocks remain unknown",
+            bundle.config.clocks.capture_rate_ppm, bundle.config.clocks.render_rate_ppm,
+            diagnostics.graph_statistics["last_steady_source_clocks"]));
+    }
+    if bundle.config.scenario == crate::Scenario::MixStress {
+        observations.push(format!("observed: correlated render-stress sources={}, silent sources={}, budget overruns={}; timing excludes drain, tracing, host scheduling and real devices",
+            bundle.config.mix_stress.sources, bundle.config.mix_stress.silent_sources,
+            diagnostics.latency["receive_execution"]["over_budget_calls"]));
     }
     if diagnostics.output_signal["discontinuity_candidates"]
         .as_u64()

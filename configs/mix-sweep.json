@@ -1,0 +1,8 @@
+{
+  "mix_sources": [1, 2, 4, 8, 16, 32, 64],
+  "max_cases": 7,
+  "max_input_duration_ms": 3000,
+  "max_total_output_samples": 3500000,
+  "max_total_source_frames": 70000000,
+  "max_total_artifact_bytes": 1073741824
+}

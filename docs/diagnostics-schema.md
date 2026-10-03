@@ -35,11 +35,14 @@ automatically level-normalized or trimmed listening version.
 
 ## Coverage and Trace
 
-ExecutionPlan declares actual input/capture/output formats and ordered stable
-stage IDs. Status `applied`, `bypassed`, `not_covered` describes node coverage, not
+ExecutionPlan declares actual input/capture/output formats and a stable node
+inventory; list order is not chronological order across independent clocks.
+Status `applied`, `bypassed`, `not_covered` describes node coverage, not
 quality. The importer recomputes the expected file plan from config and input
 format without requiring optional backends just to inspect a package. Current
-coverage levels are `capture-subchain` and `virtual-roundtrip`, never server E2E.
+coverage levels are `capture-subchain`, `virtual-roundtrip` and `render-stress`,
+never server E2E. Mix stress has receive/codec accounting null and source correction
+bypassed; its shared capture frontend only performs declared channel/rate adaptation.
 
 Trace is a JSON array of bounded snapshots. Every event contains run ID, ordinal,
 kind/stage, first_frame/frames, anonymous source/stream/epoch when applicable,
@@ -93,6 +96,17 @@ reported that double-counts parallel work, buffering or codec/group delays.
 `virtual_forwarding` uses classification `simulated`; its maximum is due time
 minus emission time, while callback observation is quantized to 10 ms. It does
 not replace unknown actual server/network measurements.
+Independent clock controls are optional/default-zero. Injected rates are stored
+separately from receiver clock inference; host arrival time remains a simulated
+source estimate, not measured hardware time. Render/stress accounting adds active
+source maxima and peak before master protection. Execution budget fields count
+ordinary measured calls and overruns/max overrun; unavailable budgets stay null.
+Mix timing includes source PCM admission/render, roundtrip timing includes
+receive/render; drain, frontend work, tracing and scheduling are excluded from
+those budgeted calls. These fields do not claim a real callback deadline was met.
+Ordinary `render_output` snapshots also retain `worker_call_ns`,
+`worker_budget_ns` and `worker_over_budget`, so an observed overrun can be located
+in the sample/time timeline even when waveform checks pass.
 
 `analyze` reports integrity-verified recorded checks and evidence limitations, not
 a root-cause certainty score. `compare` compares input/config/coverage/waveform/
@@ -103,6 +117,8 @@ Analysis also returns a bounded `evidence` timeline (64 flagged retained interva
 and `evidence_omitted`. Stage, ordinal, sample range/time and their separate domains
 refer to actual recorded observations. Flags include injected drops/stall/reorder
 selections, non-accepted arrivals, source missing frames and master safety clamps.
+The `worker_budget_overrun` flag identifies measured worker calls exceeding their
+simulated demand budget, not proof of an audible interruption.
 Observation order is not asserted causal order or first audible-defect location.
 Recorder loss remains a separate count. Sweep summaries are not run manifests:
 each case retains its own normal schema-1 diagnostic bundle and replay contract.

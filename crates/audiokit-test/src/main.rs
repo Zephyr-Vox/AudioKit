@@ -14,7 +14,7 @@ use std::{
 
 const HELP: &str = "AudioKit debugging CLI (initial offline suite)
   list-scenarios [--json]
-  describe-scenario file-processing|file-roundtrip [--json]
+  describe-scenario file-processing|file-roundtrip|mix-stress [--json]
   validate [--config FILE] [--input WAV] [--scenario NAME] [--json]
   run --input WAV --out-dir NEW_DIR [--config FILE] [--scenario NAME] [--retain-input] [--quiet]
   analyze --bundle DIR [--json]
@@ -77,12 +77,17 @@ impl Options {
             None => RunConfig::default(),
         };
         if let Some(value) = self.values.get("--scenario") {
-            config.scenario = serde_json::from_value(Value::String(
+            let scenario: Scenario = serde_json::from_value(Value::String(
                 value
                     .to_str()
                     .ok_or_else(|| Error::Invalid("scenario is not UTF-8".into()))?
                     .into(),
             ))?;
+            if self.path("--config").is_none() {
+                config = RunConfig::for_scenario(scenario);
+            } else {
+                config.scenario = scenario;
+            }
         }
         if self.flag("--retain-input") {
             config.retain_input = true;
@@ -133,7 +138,7 @@ fn execute() -> Result<(Value, i32), Error> {
         "list-scenarios" => {
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"sweep":true,"devices":false,"gui":false,"server_e2e":false}}),
+                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip","mix-stress"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"independent_clocks":cfg!(feature="codec-opus"),"mix_stress":true,"sweep":true,"devices":false,"gui":false,"server_e2e":false}}),
                 0,
             ))
         }
@@ -147,7 +152,7 @@ fn execute() -> Result<(Value, i32), Error> {
             ))?;
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenario":scenario,"default_config":RunConfig { scenario, ..Default::default() },"input":"WAV mono/stereo","output":"float32 WAV + diagnostic bundle","coverage":if scenario == Scenario::FileProcessing {"capture-subchain"} else {"virtual-roundtrip"},"not_covered":["devices","server","AEC reference"],"selection":"scenario-defined production subchain; arbitrary endpoints not implemented"}),
+                json!({"schema_version":1,"scenario":scenario,"default_config":RunConfig::for_scenario(scenario),"input":"WAV mono/stereo","output":"float32 WAV + diagnostic bundle","coverage":match scenario { Scenario::FileProcessing=>"capture-subchain", Scenario::FileRoundtrip=>"virtual-roundtrip", Scenario::MixStress=>"render-stress" },"not_covered":["devices","server","AEC reference"],"selection":"scenario-defined production subchain; arbitrary endpoints not implemented"}),
                 0,
             ))
         }

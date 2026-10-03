@@ -1,0 +1,6 @@
+{
+  "scenario": "file-roundtrip",
+  "processing": { "enabled": false },
+  "clocks": { "capture_rate_ppm": 400, "render_rate_ppm": -100 },
+  "receive": { "clock_window_ms": 1000, "clock_slew_ppm_per_second": 1000.0 }
+}

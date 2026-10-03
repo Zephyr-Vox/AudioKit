@@ -4,8 +4,9 @@ The first A5 slice is implemented: a reusable `audiokit-testkit` library and the
 headless `audiokit-test` application. CLI is for automation, reproduction and
 evidence analysis. Slint will provide the human E2E/recording/listening/export
 workbench on the same runner. Deterministic virtual packet faults and serial
-parameter sweeps are implemented. GUI, real devices, external packet-trace replay,
-mix-stress, independent clock drift and host/server E2E are **not implemented yet**.
+parameter sweeps, correlated mix stress and independent virtual sample clocks are
+implemented. GUI, real devices, external packet-trace replay and host/server E2E
+are **not implemented yet**.
 There is no arbitrary node-connection editor or selectable endpoint range yet.
 
 ## Production Coverage
@@ -26,6 +27,70 @@ include the production source/master limiter, activity mix, gain, resampling,
 jitter and clock controls. Mono voice expands to the configured render channels.
 This is a **virtual roundtrip**, not a microphone, soundcard or server test.
 
+## Independent Virtual Sample Clocks
+
+Roundtrip `clocks.capture_rate_ppm` and `clocks.render_rate_ppm` independently
+control sample quantum timing in the same virtual host clock, each -2000..=2000.
+Positive ppm means more samples per host second, not a different declared codec
+format. Event times use integer rational calculations from the clock origin;
+rounding does not accumulate once per tick. Default zero/zero preserves the old
+10 ms schedule and its exact waveform.
+
+Actual encoded payloads retain fixed ptime/sample counts. Render demand follows
+its own clock, with due packets admitted before each demand; packets emitted in
+the future are never made visible to an earlier render tick. Trace observation
+ordinals are not asserted to be sorted host timestamps across these clocks.
+The observing tick interval is about 10 ms (up to 10.021 ms at the slowest rate).
+Inference and correction still belong entirely to the production receiver.
+`simulated_clocks` records injected rates; `last_steady_source_clocks` records
+independently inferred rates, applied correction and saturation. These are not
+measured physical capture/presentation clocks, and a short fixture cannot certify
+long-run stability. Test offsets may intentionally exceed the production cap.
+
+```powershell
+.\target\release\audiokit-test.exe run --config configs\clock-roundtrip.json --input "C:\Audio\voice-3s.wav" --out-dir target\clock-001 --quiet
+```
+
+## Correlated Mix Stress
+
+`mix-stress` adapts WAV channels/rate using `CapturePcmGraph` with APM bypassed,
+then copies each processed quantum into independent registered production render
+sources. The execution plan lists this adaptation explicitly. It covers source
+gain/activity/limiter, normalization, source resampling and master protection,
+not capture hardware, codecs, jitter or source-clock inference. Clock correction
+is zero/bypassed. It is labeled `render-stress`, never full E2E.
+
+`mix_stress.sources` includes optional exact-silent sources; all other sources
+are identical in-phase replicas. This deliberately stresses correlated peaks,
+not independent natural conversations or speech intelligibility. Counts 1..=64
+must fit the production render admission limit. Gain uses the production range
+and fade. Per-run admitted source-frame budgets include frontend filter tails;
+source-count matrices additionally reserve a sum of those per-case work caps.
+Partial EOF quanta go to explicit drain, not fake full render demand.
+
+```powershell
+.\target\release\audiokit-test.exe run --config configs\mix-stress.json --input "C:\Audio\voice-3s.wav" --out-dir target\mix-001 --quiet
+.\target\release\audiokit-test.exe sweep --config configs\mix-stress.json --matrix configs\mix-sweep.json --input "C:\Audio\voice-3s.wav" --out-dir target\mix-sweep-001 --quiet
+```
+
+The example matrix covers 1/2/4/8/16/32/64 sources with a source clip no longer
+than three seconds. Aggregate metrics retain peak before the master limiter,
+maximum energy-active source counts, reduction/clamps/queues and actual sample
+ceiling checks after trace loss. A paired one-source versus one-audible/seven-silent
+regression compares full output WAV bytes in both mono voice and stereo desktop
+profiles, not only activity counts.
+
+`receive_execution` measures render work in this codec-free scenario; it includes
+source admission plus render for ordinary mix blocks. For roundtrip it measures
+receive/render calls. Budget counters compare those measured calls against the
+nominal or simulated render period; drain is not budgeted. Overruns are observed
+CPU/OS timing, not a hard realtime certification or an automatic audible-failure
+check. Capture preprocessing, tracing, artifact I/O and host scheduling are not
+included in that deadline scope. Percentile histograms are still unavailable.
+Ordinary render snapshots include worker elapsed/budget nanoseconds and an
+over-budget flag. Analysis exposes flagged stage/sample ranges without calling
+them audible glitches; aggregate counts survive truncated tracing.
+
 ## Virtual Forwarding Faults
 
 Roundtrip `transport` config accepts fixed delay, independent nonnegative delay
@@ -40,7 +105,8 @@ the delay is too small or surrounding packets are lost. Duplicate copies arrive
 after the original at the same simulated timestamp. A pause holds deliveries due
 inside its interval until its end, without pausing capture or render callbacks.
 This is network/forwarder stall, not a DSP-worker or output-callback stall.
-There is no simulated capture/render clock drift yet.
+Independent sample-clock offsets are configured separately from transport faults;
+they do not simulate a worker/output-callback pause or an abrupt device-clock jump.
 
 The pending-copy cap (default 1024, hard 4096) fails explicitly before queue
 mutation. Normal demand continues after capture EOF only while packets remain
@@ -52,7 +118,8 @@ demand is invented to count trailing loss as PLC.
 sample range. `transport_arrival` records original ordinal, sequence, copy kind,
 scheduled delay, receiver admission outcome and observing callback time. Arrival
 timestamps are simulated host nanoseconds; callbacks observe arrivals at 10 ms
-resolution. Payloads are not included in trace. Original/drop/copy/delivery/pending
+resolution by default (the configured render rate may shift it slightly). Payloads
+are not included in trace. Original/drop/copy/delivery/pending
 totals survive trace truncation. Virtual delay is not measured server latency.
 
 ```powershell
@@ -75,8 +142,9 @@ truncation are separate; unrecorded intervals remain unknown.
 ## Serial Parameter Matrix
 
 `sweep` uses the same runner, configuration validator and production factory.
-Typed Cartesian axes cover bitrates, ptimes, noise levels and encoded jitter
-startup targets. Empty axes retain the base setting. Uncovered codec/jitter axes
+Typed Cartesian axes cover bitrates, ptimes, noise levels, encoded jitter startup
+targets and render-stress total/silent source counts. Empty axes retain the base
+setting. Uncovered codec/jitter/mix axes
 and noise axes on bypassed APM are rejected. All combinations and actual graph
 construction are preflighted before creating the root directory.
 
@@ -254,3 +322,24 @@ with zero decoder errors and byte-identical replay. The 40/80/120 ms sweep recor
 17/1/0 late arrivals and 5/2/0 PLC slots for the same fault decisions. These counts
 demonstrate the debugging workflow, not a recommendation to raise production
 buffers or a claim that FEC successfully recovered each missing packet.
+
+The third A5 slice adds independent rational capture/render clocks, correlated
+mix stress, silent-source pairing, source-work admission and per-block worker
+budget evidence. Windows validation on 2026-10-03 passes 109 workspace
+unit/integration tests plus one doctest; the no-default-feature suite passes
+24 unit/integration tests plus one doctest. Format checking, both strict Clippy
+configurations, warning-as-error Rustdoc and Release build pass.
+
+Release evidence under `target/validation/a5-20261003/`: `desktop-clock-zero`
+retains the previous clean transport waveform; `independent-clocks` infers
+approximately +400/-100 ppm with -500 ppm compensation and has byte-identical
+replay. The seven-case `mix-sweep` passes its scoped sample-ceiling/queue/activity
+checks. The observed 32-source maximum worker call was 6.90 ms, while 64 sources
+had 42 of 300 ordinary calls over 10 ms, with a 13.80 ms maximum. A later
+`mix64-timeline` run with per-block timing retained the exact waveform and recorded
+11 of 300 calls over budget, maximum 13.77 ms. Its analysis locates overrun
+intervals by stage/frame/time. CPU/OS scheduling makes these timings variable;
+neither run certifies a hardware callback deadline. In particular, waveform
+checks passing does **not** accept 64-source realtime performance. The production
+default admission limit remains unchanged at 32; profiling is needed before
+claiming a larger realtime capacity. Generated evidence/music are not committed.

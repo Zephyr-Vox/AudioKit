@@ -20,6 +20,7 @@ mod config;
 mod io;
 mod report;
 mod runner;
+mod simulation;
 mod sweep;
 mod transport;
 pub use bundle::{Analysis, Comparison, Evidence, analyze, compare, replay};
@@ -28,6 +29,7 @@ pub use config::{
 };
 pub use report::{Artifact, Check, Diagnostics, Manifest, ReplayOrigin, TraceEvent};
 pub use runner::{Cancellation, ProgressEvent, run};
+pub use simulation::{ClockConfig, MixStressConfig};
 pub use sweep::{SweepCase, SweepMatrix, SweepReport, sweep};
 pub use transport::TransportConfig;
 
@@ -86,7 +88,8 @@ impl Error {
 pub fn plan_file(config: &RunConfig, input: &std::path::Path) -> Result<ExecutionPlan> {
     config.validate()?;
     let raw = io::bytes(input, config.max_input_bytes)?;
-    let (format, _) = io::wav(&raw, config.max_pcm_samples)?;
+    let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
+    runner::validate_source_budget(config, format, pcm.len())?;
     let plan = config.plan(format)?;
     runner::validate_plan(config, &plan)?;
     Ok(plan)

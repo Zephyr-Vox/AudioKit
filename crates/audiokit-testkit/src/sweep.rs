@@ -18,6 +18,12 @@ pub struct SweepMatrix {
     pub noise_levels: Vec<crate::NoiseLevel>,
     /// Encoded jitter startup target in milliseconds.
     pub jitter_targets_ms: Vec<u16>,
+    /// Render-stress source-count axis, including silent sources.
+    pub mix_sources: Vec<usize>,
+    /// Render-stress silent-source axis; each combination must leave audible sources.
+    pub mix_silent_sources: Vec<usize>,
+    /// Sum of per-case configured source-frame caps for mix stress, at most 200 million.
+    pub max_total_source_frames: u64,
     /// Maximum Cartesian combinations, 1..=32.
     pub max_cases: usize,
     /// Maximum source duration per case, 1..=600000 ms; not a wall-clock timeout.
@@ -35,6 +41,9 @@ impl Default for SweepMatrix {
             ptimes: Vec::new(),
             noise_levels: Vec::new(),
             jitter_targets_ms: Vec::new(),
+            mix_sources: Vec::new(),
+            mix_silent_sources: Vec::new(),
+            max_total_source_frames: 64_000_000,
             max_cases: 16,
             max_input_duration_ms: 30_000,
             max_total_output_samples: 64 * 1024 * 1024,
@@ -51,6 +60,7 @@ impl SweepMatrix {
             || !(1..=600_000).contains(&self.max_input_duration_ms)
             || !(1..=268_435_456).contains(&self.max_total_output_samples)
             || !(1..=2_147_483_648).contains(&self.max_total_artifact_bytes)
+            || !(1..=200_000_000).contains(&self.max_total_source_frames)
         {
             return Err(Error::Invalid("invalid sweep schema or budgets".into()));
         }
@@ -59,6 +69,8 @@ impl SweepMatrix {
             self.ptimes.len(),
             self.noise_levels.len(),
             self.jitter_targets_ms.len(),
+            self.mix_sources.len(),
+            self.mix_silent_sources.len(),
         ];
         let count = axes
             .into_iter()
@@ -67,7 +79,7 @@ impl SweepMatrix {
         if count > self.max_cases {
             return Err(Error::Invalid("sweep combination budget exceeded".into()));
         }
-        if (base.scenario == crate::Scenario::FileProcessing)
+        if (base.scenario != crate::Scenario::FileRoundtrip)
             && (!self.bitrates_bps.is_empty()
                 || !self.ptimes.is_empty()
                 || !self.jitter_targets_ms.is_empty())
@@ -79,6 +91,20 @@ impl SweepMatrix {
         if !self.noise_levels.is_empty() && !base.processing.enabled {
             return Err(Error::Invalid(
                 "noise sweep requires an enabled voice processor".into(),
+            ));
+        }
+        if base.scenario != crate::Scenario::MixStress
+            && (!self.mix_sources.is_empty() || !self.mix_silent_sources.is_empty())
+        {
+            return Err(Error::Invalid(
+                "mix axes require render-stress coverage".into(),
+            ));
+        }
+        if base.scenario == crate::Scenario::MixStress
+            && count as u64 * base.mix_stress.max_total_source_frames > self.max_total_source_frames
+        {
+            return Err(Error::Invalid(
+                "sum of source-frame caps exceeds sweep work budget".into(),
             ));
         }
         if count as u64 * base.max_pcm_samples as u64 > self.max_total_output_samples {
@@ -106,24 +132,53 @@ impl SweepMatrix {
         } else {
             self.jitter_targets_ms.clone()
         };
-        let mut configs = Vec::with_capacity(count);
-        for bitrate in bitrates {
-            for ptime in &ptimes {
-                for level in &levels {
-                    for target in &targets {
-                        let mut config = base.clone();
-                        config.bitrate_bps = bitrate;
-                        config.ptime = *ptime;
-                        config.processing.noise_suppression = *level;
-                        config.receive.jitter.target_ms = *target;
-                        config.validate()?;
-                        configs.push(config);
-                    }
-                }
-            }
+        let mut configs = vec![base.clone()];
+        let counts = if self.mix_sources.is_empty() {
+            vec![base.mix_stress.sources]
+        } else {
+            self.mix_sources.clone()
+        };
+        let silent = if self.mix_silent_sources.is_empty() {
+            vec![base.mix_stress.silent_sources]
+        } else {
+            self.mix_silent_sources.clone()
+        };
+        configs = expand_axis(configs, &bitrates, |config, value| {
+            config.bitrate_bps = value
+        });
+        configs = expand_axis(configs, &ptimes, |config, value| config.ptime = value);
+        configs = expand_axis(configs, &levels, |config, value| {
+            config.processing.noise_suppression = value
+        });
+        configs = expand_axis(configs, &targets, |config, value| {
+            config.receive.jitter.target_ms = value
+        });
+        configs = expand_axis(configs, &counts, |config, value| {
+            config.mix_stress.sources = value
+        });
+        configs = expand_axis(configs, &silent, |config, value| {
+            config.mix_stress.silent_sources = value
+        });
+        for config in &configs {
+            config.validate()?;
         }
         Ok(configs)
     }
+}
+fn expand_axis<T: Copy>(
+    configs: Vec<RunConfig>,
+    values: &[T],
+    apply: impl Fn(&mut RunConfig, T),
+) -> Vec<RunConfig> {
+    let mut expanded = Vec::with_capacity(configs.len() * values.len());
+    for config in configs {
+        for value in values {
+            let mut candidate = config.clone();
+            apply(&mut candidate, *value);
+            expanded.push(candidate);
+        }
+    }
+    expanded
 }
 /// One case's scoped checks or failure; bundle directories are relative to the sweep root.
 #[derive(Debug, Serialize)]
@@ -184,15 +239,18 @@ pub fn sweep(
     let raw = io::bytes(input, base.max_input_bytes)?;
     let (format, pcm) = io::wav(&raw, base.max_pcm_samples)?;
     let frames = format.frames_in(pcm.len())?.get();
+    crate::runner::validate_source_budget(base, format, pcm.len())?;
     if frames * 1000 > u64::from(format.sample_rate_hz()) * u64::from(matrix.max_input_duration_ms)
     {
         return Err(Error::Invalid(
             "source exceeds sweep duration budget".into(),
         ));
     }
+    let input_samples = pcm.len();
     drop(pcm);
     let mut reserved = 3 * io::JSON_LIMIT; // Summary, matrix and base configuration.
     for config in &configs {
+        crate::runner::validate_source_budget(config, format, input_samples)?;
         let plan = config.plan(format)?;
         crate::runner::validate_plan(config, &plan)?;
         reserved += 4 * io::JSON_LIMIT

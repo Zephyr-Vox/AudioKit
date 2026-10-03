@@ -64,8 +64,9 @@ virtual-roundtrip runner, diagnostic bundle v1 and headless CLI analysis/replay/
 CaptureGraph delegates its PCM frontend to CapturePcmGraph, so partial-chain tests
 do not need a dummy encoder or duplicate DSP. The next slice adds deterministic
 virtual loss/jitter/reorder/duplicate/forwarding-stall and bounded serial parameter
-sweeps. Slint, device-probe migration, external packet trace replay, mix-stress and
-independent clock-drift simulation remain pending. See `testkit.md`.
+sweeps. Correlated render-only mix stress and independent capture/render virtual
+clocks now run on the same production graphs. Slint, device-probe migration and
+external packet trace replay remain pending. See `testkit.md`.
 A6 still needs agent/TUI production device/scheduler
 switching, bounded legacy codec-map removal and hardware/E2E verification. Native
 device-to-host timestamp mapping and AEC delay calibration are not yet certified.
