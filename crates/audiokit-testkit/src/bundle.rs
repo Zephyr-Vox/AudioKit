@@ -27,13 +27,18 @@ fn load(root: &Path) -> Result<Bundle> {
             "unsupported manifest schema or artifact count".into(),
         ));
     }
+    let input_artifact = if manifest.artifacts.iter().any(|a| a.path == "packets.json") {
+        "packets.json"
+    } else {
+        "input.wav"
+    };
     let expected: BTreeSet<_> = if manifest.input_audio_authorized {
         [
             "config.json",
             "diagnostics.json",
             "trace.json",
             "processed.wav",
-            "input.wav",
+            input_artifact,
         ]
         .into_iter()
         .collect()
@@ -74,10 +79,10 @@ fn load(root: &Path) -> Result<Bundle> {
         if data.len() as u64 != artifact.bytes || io::hash(&data) != artifact.sha256 {
             return Err(Error::Invalid("artifact size or SHA256 mismatch".into()));
         }
-        if artifact.path.ends_with(".json") {
-            snapshots.insert(artifact.path.clone(), data);
-        } else if artifact.path == "input.wav" {
+        if artifact.path == input_artifact {
             input = Some(data);
+        } else if artifact.path.ends_with(".json") {
+            snapshots.insert(artifact.path.clone(), data);
         }
     }
     if seen != expected {
@@ -96,13 +101,9 @@ fn load(root: &Path) -> Result<Bundle> {
         || !["completed", "cancelled", "failed"].contains(&diagnostics.status.as_str())
         || serde_json::to_value(&expected_plan)? != serde_json::to_value(&diagnostics.plan)?
         || config.retain_input != manifest.input_audio_authorized
+        || config.retain_input && config.input_artifact() != input_artifact
         || manifest.complete != (diagnostics.status == "completed")
-        || manifest.reproduction
-            != if config.retain_input {
-                "signal-replay"
-            } else {
-                "metadata-only"
-            }
+        || manifest.reproduction != config.reproduction(&diagnostics.graph_statistics)
         || serde_json::to_value(&config)? != serde_json::to_value(&diagnostics.effective_config)?
     {
         return Err(Error::Invalid(
@@ -131,12 +132,26 @@ fn load(root: &Path) -> Result<Bundle> {
         ));
     }
     if input.as_ref().is_some_and(|data| {
-        data.len() as u64 > config.max_input_bytes.min(268_435_456)
-            || io::hash(data) != diagnostics.input_sha256
+        data.len() as u64 > config.input_byte_limit() || io::hash(data) != diagnostics.input_sha256
     }) {
         return Err(Error::Invalid(
             "retained source does not match input hash".into(),
         ));
+    }
+    if config.scenario == crate::Scenario::ReceiveSimulation {
+        if diagnostics.input_frames != 0 {
+            return Err(Error::Invalid(
+                "packet input cannot assert original PCM frame count".into(),
+            ));
+        }
+        if let Some(data) = &input {
+            let packet_trace = crate::packet_trace::parse(data, &config)?;
+            if packet_trace.source.format != diagnostics.plan.input_format
+                || packet_trace.summary() != diagnostics.graph_statistics["packet_recording"]
+            {
+                return Err(Error::Invalid("packet material/report mismatch".into()));
+            }
+        }
     }
     Ok(Bundle {
         manifest,
@@ -181,12 +196,16 @@ fn evidence_flags(event: &TraceEvent) -> Vec<String> {
             }
         }
     }
-    if event.stage == "transport_arrival"
+    if matches!(event.stage.as_str(), "transport_arrival" | "packet_input")
         && let Some(outcome) = metrics["outcome"]
             .as_str()
             .filter(|value| *value != "accepted")
     {
-        flags.push(format!("receiver_{outcome}"));
+        flags.push(if outcome == "payload_unavailable" {
+            "recording_payload_missing".into()
+        } else {
+            format!("receiver_{outcome}")
+        });
     }
     if event.stage == "render_output" {
         if metrics["worker_over_budget"] == true {
@@ -273,6 +292,13 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
             bundle.config.mix_stress.sources, bundle.config.mix_stress.silent_sources,
             diagnostics.latency["receive_execution"]["over_budget_calls"]));
     }
+    if bundle.config.scenario == crate::Scenario::ReceiveSimulation {
+        observations.push(format!("observed: external single-source recording material complete={}; missing payloads={}, omitted arrivals={}, omitted demands={}; cold-start receiver only, synthetic drain and no actual device/server scheduling",
+            diagnostics.graph_statistics["packet_recording"]["complete_material"],
+            diagnostics.graph_statistics["packet_recording"]["missing_payloads"],
+            diagnostics.graph_statistics["packet_recording"]["omitted_packets"],
+            diagnostics.graph_statistics["packet_recording"]["omitted_render_ticks"]));
+    }
     if diagnostics.output_signal["discontinuity_candidates"]
         .as_u64()
         .unwrap_or(0)
@@ -332,7 +358,7 @@ pub fn replay(
     let bundle = load(bundle_dir)?;
     let input =
         match input_override {
-            Some(path) => io::bytes(path, bundle.config.max_input_bytes.min(268_435_456))?,
+            Some(path) => io::bytes(path, bundle.config.input_byte_limit())?,
             None if bundle.manifest.input_audio_authorized => bundle
                 .input
                 .ok_or_else(|| Error::Invalid("authorized input missing".into()))?,

@@ -64,9 +64,9 @@ pub struct Diagnostics {
     pub effective_config: RunConfig,
     /// Declared graph coverage and boundary formats.
     pub plan: ExecutionPlan,
-    /// SHA256 of the original WAV bytes, without retaining the audio by default.
+    /// SHA256 of the original WAV or packet JSON bytes; retention requires consent.
     pub input_sha256: String,
-    /// Original per-channel frames.
+    /// Original per-channel WAV frames; zero for encoded input with unknown PCM length.
     pub input_frames: u64,
     /// Produced per-channel frames including explicit latency/tail.
     pub output_frames: u64,
@@ -138,7 +138,7 @@ pub struct Manifest {
     pub backends: Vec<String>,
     /// Whether the audio run completed; separate from checks passing.
     pub complete: bool,
-    /// signal-replay only when input was explicitly retained; otherwise metadata-only.
+    /// metadata-only, signal-replay, packet-replay or partial-packet-replay.
     pub reproduction: String,
     /// Explicit authorization to retain the original input audio.
     pub input_audio_authorized: bool,

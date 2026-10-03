@@ -5,8 +5,9 @@ headless `audiokit-test` application. CLI is for automation, reproduction and
 evidence analysis. Slint will provide the human E2E/recording/listening/export
 workbench on the same runner. Deterministic virtual packet faults and serial
 parameter sweeps, correlated mix stress and independent virtual sample clocks are
-implemented. GUI, real devices, external packet-trace replay and host/server E2E
-are **not implemented yet**.
+implemented. Single-source external Opus packet/schedule replay is available;
+see `packet-replay.md` for its separate input/material contract. GUI, real devices,
+live host packet export and host/server E2E are **not implemented yet**.
 There is no arbitrary node-connection editor or selectable endpoint range yet.
 
 ## Production Coverage
@@ -26,6 +27,14 @@ drain; extra ordinary callbacks after EOF would manufacture PLC. Receive paramet
 include the production source/master limiter, activity mix, gain, resampling,
 jitter and clock controls. Mono voice expands to the configured render channels.
 This is a **virtual roundtrip**, not a microphone, soundcard or server test.
+
+`receive-simulation` starts directly at recorded Opus arrivals and recorded
+fixed-10-ms render demands; it does not re-encode source WAV. It supports one
+anonymous source/epoch with fixed negotiated ptime. Payloads, cold-start state
+and omission declarations determine packet versus partial reproduction. Actual
+arrival/demand times are preserved; synthetic EOF drain is explicit. WAV input,
+external packet sweep and direct old CLI diagnostics import are unavailable for
+this scenario. SDK/live export integration remains a host responsibility.
 
 ## Independent Virtual Sample Clocks
 
@@ -239,7 +248,7 @@ remote/system capture, neither of which these scenarios open.
 ```
 
 A metadata-only bundle can still replay when `--input` supplies the original
-hash-matching WAV. It cannot reconstruct audio from trace text. Replay re-executes
+hash-matching WAV or packet JSON. It cannot reconstruct audio from trace text. Replay re-executes
 the original file config, not real OS callback scheduling. Build/target/backend
 differences are visible; a matching waveform hash is expected for deterministic
 same-build runs, not demanded across all platforms.
@@ -343,3 +352,23 @@ neither run certifies a hardware callback deadline. In particular, waveform
 checks passing does **not** accept 64-source realtime performance. The production
 default admission limit remains unchanged at 32; profiling is needed before
 claiming a larger realtime capacity. Generated evidence/music are not committed.
+
+The fourth A5 slice adds `receive-simulation` with bounded external original Opus
+arrivals and recorded fixed-quantum demand. Windows validation on 2026-10-03
+passes 117 workspace unit/integration tests plus one doctest and 26 headless
+unit/integration tests plus one doctest. Both build modes pass strict Clippy;
+format checking, warning-as-error Rustdoc and Release build pass. Build-mode tests
+run serially because they share the CLI executable path; overlapping builds can
+otherwise replace the executable while integration tests are running.
+
+Generated voice/desktop real-codec packet fixtures reproduce the previous
+roundtrip WAV byte-for-byte. Replays preserve wrapping/duplicate/reordered
+sequences, irregular demand timestamps and scoped loss recovery observations.
+Missing payloads, mid-stream state and omission declarations keep partial
+reproduction; corrupt packets fail decoder checks. Tampering, byte/payload/work
+limits, cancellation and synthetic-tail output exhaustion are covered. Release
+`packet-missing-release` under `target/validation/a5-20261003/` confirms a missing
+payload emits `partial-packet-replay` and check-failure exit 1, never healthy media.
+A no-Opus CLI successfully analyzes that bundle. This is offline model evidence;
+live client packet export, multistream/lifecycle replay and hardware E2E remain
+unimplemented. See `packet-replay.md` for exact supported boundaries and commands.

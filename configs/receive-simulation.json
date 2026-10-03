@@ -1,0 +1,9 @@
+{
+  "scenario": "receive-simulation",
+  "processing": { "enabled": false },
+  "receive_simulation": {
+    "max_packets": 8192,
+    "max_render_ticks": 6000,
+    "max_duration_ms": 60000
+  }
+}

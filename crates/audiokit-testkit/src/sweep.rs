@@ -54,6 +54,11 @@ impl Default for SweepMatrix {
 impl SweepMatrix {
     /// Expands a stable Cartesian order and validates all configurations without I/O.
     pub fn expand(&self, base: &RunConfig) -> Result<Vec<RunConfig>> {
+        if base.scenario == crate::Scenario::ReceiveSimulation {
+            return Err(Error::Capability(
+                "external packet sweep is not implemented; run/replay a recording instead".into(),
+            ));
+        }
         base.validate()?;
         if self.schema_version != 1
             || !(1..=32).contains(&self.max_cases)

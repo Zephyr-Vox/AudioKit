@@ -68,7 +68,7 @@ fn value(output: &Output) -> serde_json::Value {
 fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
     let output = execute(&["list-scenarios", "--json"]);
     assert!(output.status.success());
-    assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 3);
+    assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 4);
     assert_eq!(value(&output)["capabilities"]["gui"], false);
     assert_eq!(value(&output)["capabilities"]["devices"], false);
     assert_eq!(value(&output)["capabilities"]["sweep"], true);
@@ -76,6 +76,67 @@ fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
         let output = execute(&[cmd]);
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value(&output)["exit_code"], 3);
+    }
+}
+
+#[test]
+fn external_packet_scenario_reports_missing_material_and_backend_capability() {
+    let fixture = Fixture::new();
+    let described = execute(&["describe-scenario", "receive-simulation", "--json"]);
+    assert!(described.status.success());
+    assert_eq!(value(&described)["coverage"], "receiver-replay");
+    assert_eq!(
+        value(&described)["default_config"]["processing"]["enabled"],
+        false
+    );
+    let recording = fixture.path("recording.json");
+    fs::write(&recording, serde_json::to_vec(&serde_json::json!({
+        "schema_version":1,
+        "source":{"source_id":7,"stream_id":3,"epoch":11,"kind":"voice",
+            "format":{"sample_rate_hz":48000,"layout":"mono"},"ptime":20},
+        "starts_at_stream_start":true,"omitted_packets":0,"omitted_render_ticks":0,
+        "packets":[{"sequence":1,"arrival_ns":20000000,"duration":20,"media_frame":null,"payload":null}],
+        "render_ticks_ns":[10000000,20000000,30000000]
+    })).unwrap()).unwrap();
+    let out = fixture.path("receive");
+    let result = execute(&[
+        "run",
+        "--scenario",
+        "receive-simulation",
+        "--input",
+        recording.to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+        "--retain-input",
+        "--quiet",
+    ]);
+    if cfg!(feature = "codec-opus") {
+        assert_eq!(result.status.code(), Some(1));
+        assert_eq!(
+            value(&result)["graph_statistics"]["packet_replay"]["missing_payloads"],
+            1
+        );
+        assert!(out.join("packets.json").is_file());
+        let analysis = execute(&["analyze", "--bundle", out.to_str().unwrap(), "--json"]);
+        assert_eq!(analysis.status.code(), Some(1));
+        assert_eq!(value(&analysis)["reproduction"], "partial-packet-replay");
+        let replayed = fixture.path("replayed");
+        let replay = execute(&[
+            "replay",
+            "--bundle",
+            out.to_str().unwrap(),
+            "--out-dir",
+            replayed.to_str().unwrap(),
+            "--quiet",
+        ]);
+        assert_eq!(replay.status.code(), Some(1));
+        assert_eq!(
+            fs::read(out.join("processed.wav")).unwrap(),
+            fs::read(replayed.join("processed.wav")).unwrap()
+        );
+    } else {
+        assert_eq!(result.status.code(), Some(3));
+        assert!(!out.exists());
     }
 }
 

@@ -18,6 +18,7 @@
 mod bundle;
 mod config;
 mod io;
+mod packet_trace;
 mod report;
 mod runner;
 mod simulation;
@@ -27,8 +28,9 @@ pub use bundle::{Analysis, Comparison, Evidence, analyze, compare, replay};
 pub use config::{
     ExecutionPlan, NodeStatus, NoiseLevel, ProcessingConfig, RunConfig, Scenario, Stage,
 };
+pub use packet_trace::{PacketSource, PacketTrace, ReceiveSimulationConfig, RecordedPacket};
 pub use report::{Artifact, Check, Diagnostics, Manifest, ReplayOrigin, TraceEvent};
-pub use runner::{Cancellation, ProgressEvent, run};
+pub use runner::{Cancellation, ProgressEvent, ProgressUnit, run};
 pub use simulation::{ClockConfig, MixStressConfig};
 pub use sweep::{SweepCase, SweepMatrix, SweepReport, sweep};
 pub use transport::TransportConfig;
@@ -84,10 +86,16 @@ impl Error {
     }
 }
 
-/// Validates WAV samples and constructs the production graph without writing artifacts.
+/// Validates WAV or packet material and constructs the production graph without artifacts.
 pub fn plan_file(config: &RunConfig, input: &std::path::Path) -> Result<ExecutionPlan> {
     config.validate()?;
-    let raw = io::bytes(input, config.max_input_bytes)?;
+    let raw = io::bytes(input, config.input_byte_limit())?;
+    if config.scenario == Scenario::ReceiveSimulation {
+        let trace = packet_trace::parse(&raw, config)?;
+        let plan = config.plan(trace.source.format)?;
+        runner::validate_plan(config, &plan)?;
+        return Ok(plan);
+    }
     let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
     runner::validate_source_budget(config, format, pcm.len())?;
     let plan = config.plan(format)?;

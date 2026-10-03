@@ -8,7 +8,8 @@ unknown config/report fields are rejected rather than silently ignored.
 ## Files and Identity
 
 `manifest.json` references exactly `config.json`, `diagnostics.json`, `trace.json`
-and `processed.wav`, plus optional explicitly authorized `input.wav`. Artifact
+and `processed.wav`, plus optional explicitly authorized `input.wav` or
+`packets.json` (only for receive-simulation). Artifact
 paths are fixed relative filenames; sizes and SHA256 are validated before parsing.
 Missing, duplicate, unexpected, escaping or tampered artifacts fail import. Reads
 have absolute byte/sample limits even when the manifest is untrusted.
@@ -17,8 +18,12 @@ Manifest contains run ID, revision, Rust/TOML/lockfile source digest (including
 uncommitted files), OS/arch/build profile and compiled backends. It records run
 completion separately from checks and recording authorization. Hash integrity is
 not producer authentication. `signal-replay` means source WAV was included;
-`metadata-only` requires an externally supplied original hash-matching WAV to replay.
-Hardware and packet replay are not implemented by schema 1's file scenarios.
+`packet-replay` means complete declared cold-start packet/schedule material is
+included; `partial-packet-replay` means retained material has omissions, unknown
+omission counts or unknown preceding stream state. `metadata-only` requires
+externally supplied original hash-matching WAV or packet JSON to replay. Hardware
+replay is not implemented. See `packet-replay.md` for the strict separate packet
+input schema, bounds and producer-declared completeness limits.
 
 `config.json` contains validated effective run controls and resource budgets, no
 local input filename. `diagnostics.json` retains requested/effective controls,
@@ -40,9 +45,19 @@ inventory; list order is not chronological order across independent clocks.
 Status `applied`, `bypassed`, `not_covered` describes node coverage, not
 quality. The importer recomputes the expected file plan from config and input
 format without requiring optional backends just to inspect a package. Current
-coverage levels are `capture-subchain`, `virtual-roundtrip` and `render-stress`,
+coverage levels are `capture-subchain`, `virtual-roundtrip`, `render-stress`
+and `receiver-replay`,
 never server E2E. Mix stress has receive/codec accounting null and source correction
 bypassed; its shared capture frontend only performs declared channel/rate adaptation.
+Receiver replay marks capture/encode/virtual forwarding not covered. Original
+input PCM frame count is unknown (legacy `input_frames` is zero and
+`packet_replay.input_pcm_frames` is null). Packet/schedule summary and admitted,
+missing and pending record counts are separate from receiver decode outcomes.
+`packet_input` event IDs preserve anonymous source/stream/epoch. Unknown source
+media position has a zero-length range in `media_position_unknown`, never frame
+zero asserted as measured alignment. Traces contain metadata, not payload bytes.
+Synthetic drain is outside recorded ordinary-demand metrics; execution budgets
+use preceding recorded demand intervals, not a claimed real hardware deadline.
 
 Trace is a JSON array of bounded snapshots. Every event contains run ID, ordinal,
 kind/stage, first_frame/frames, anonymous source/stream/epoch when applicable,

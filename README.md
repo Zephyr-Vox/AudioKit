@@ -79,8 +79,9 @@ See `docs/host-integration.md` for worker ownership and timing contracts.
 The first A5 testkit/CLI slice is available; see `docs/testkit.md` for file scenarios,
 diagnostic bundle export, integrity checks, analysis, signal replay, deterministic
 virtual forwarding faults, bounded serial sweeps, correlated mix stress and
-independent virtual clocks. Slint, native device scenarios, external packet replay
-and the server host bridge are still pending.
+independent virtual clocks and single-source external Opus packet replay.
+See `docs/packet-replay.md` for recording consent, completeness and schedule limits.
+Slint, native device scenarios and the server host bridge are still pending.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
 is implied by the deterministic tests in this workspace.

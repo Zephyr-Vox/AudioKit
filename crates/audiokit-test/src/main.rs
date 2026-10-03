@@ -14,15 +14,16 @@ use std::{
 
 const HELP: &str = "AudioKit debugging CLI (initial offline suite)
   list-scenarios [--json]
-  describe-scenario file-processing|file-roundtrip|mix-stress [--json]
+  describe-scenario file-processing|file-roundtrip|mix-stress|receive-simulation [--json]
   validate [--config FILE] [--input WAV] [--scenario NAME] [--json]
-  run --input WAV --out-dir NEW_DIR [--config FILE] [--scenario NAME] [--retain-input] [--quiet]
+  run --input WAV_OR_PACKET_JSON --out-dir NEW_DIR [--config FILE] [--scenario NAME] [--retain-input] [--quiet]
   analyze --bundle DIR [--json]
   replay --bundle DIR --out-dir NEW_DIR [--input ORIGINAL_WAV] [--quiet]
   compare --baseline DIR --candidate DIR [--json]
   sweep --input WAV --matrix FILE --out-dir NEW_DIR [--config FILE] [--retain-input] [--quiet]
 All results are JSON on stdout; progress is on stderr. Input retention is opt-in.
-Only WAV PCM16/24/32 and float32 mono/stereo are supported. No devices/network/GUI.
+WAV PCM16/24/32 or float32 mono/stereo; receive-simulation takes packet JSON v1.
+No devices/network/GUI. Packet payload retention is opt-in audio-sharing consent.
 Exit: 0 checks pass, 1 checks fail, 2 invalid arguments, 3 unavailable capability,
       4 execution/I/O failure, 130 cancellation.
 ";
@@ -113,8 +114,13 @@ fn progress(quiet: bool) -> impl FnMut(audiokit_testkit::ProgressEvent) {
     move |event| {
         if !quiet && last.elapsed().as_millis() >= 250 {
             eprintln!(
-                "processed {}/{} input frames",
-                event.input_frames, event.total_frames
+                "processed {}/{} {}",
+                event.input_frames,
+                event.total_frames,
+                match event.unit {
+                    audiokit_testkit::ProgressUnit::InputFrames => "input frames",
+                    audiokit_testkit::ProgressUnit::PacketRecords => "packet records",
+                }
             );
             last = Instant::now();
         }
@@ -138,7 +144,7 @@ fn execute() -> Result<(Value, i32), Error> {
         "list-scenarios" => {
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip","mix-stress"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"independent_clocks":cfg!(feature="codec-opus"),"mix_stress":true,"sweep":true,"devices":false,"gui":false,"server_e2e":false}}),
+                json!({"schema_version":1,"scenarios":["file-processing","file-roundtrip","mix-stress","receive-simulation"],"capabilities":{"codec_opus":cfg!(feature="codec-opus"),"processing_sonora":cfg!(feature="processing-sonora"),"virtual_faults":cfg!(feature="codec-opus"),"independent_clocks":cfg!(feature="codec-opus"),"packet_replay":cfg!(feature="codec-opus"),"mix_stress":true,"sweep":true,"packet_sweep":false,"devices":false,"gui":false,"server_e2e":false}}),
                 0,
             ))
         }
@@ -152,7 +158,7 @@ fn execute() -> Result<(Value, i32), Error> {
             ))?;
             Options::parse(args, &["--json"])?;
             Ok((
-                json!({"schema_version":1,"scenario":scenario,"default_config":RunConfig::for_scenario(scenario),"input":"WAV mono/stereo","output":"float32 WAV + diagnostic bundle","coverage":match scenario { Scenario::FileProcessing=>"capture-subchain", Scenario::FileRoundtrip=>"virtual-roundtrip", Scenario::MixStress=>"render-stress" },"not_covered":["devices","server","AEC reference"],"selection":"scenario-defined production subchain; arbitrary endpoints not implemented"}),
+                json!({"schema_version":1,"scenario":scenario,"default_config":RunConfig::for_scenario(scenario),"input":if scenario == Scenario::ReceiveSimulation {"packet recording JSON v1, single source/epoch"} else {"WAV mono/stereo"},"output":"float32 WAV + diagnostic bundle","coverage":match scenario { Scenario::FileProcessing=>"capture-subchain", Scenario::FileRoundtrip=>"virtual-roundtrip", Scenario::MixStress=>"render-stress", Scenario::ReceiveSimulation=>"receiver-replay" },"not_covered":["devices","server","AEC reference"],"selection":"scenario-defined production subchain; arbitrary endpoints not implemented"}),
                 0,
             ))
         }

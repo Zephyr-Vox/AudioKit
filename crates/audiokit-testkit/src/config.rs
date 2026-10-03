@@ -15,6 +15,8 @@ pub enum Scenario {
     FileRoundtrip,
     /// Correlated PCM replicas and silent sources through the production render graph.
     MixStress,
+    /// External Opus arrivals and recorded demand through production receive/render.
+    ReceiveSimulation,
 }
 /// Backend-neutral suppression levels.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -81,7 +83,7 @@ pub struct RunConfig {
     pub bitrate_bps: u32,
     /// Complete Opus payload capacity, 1..=4000 bytes.
     pub max_payload_bytes: usize,
-    /// Production receive/render controls, applied only to roundtrip.
+    /// Production receive/render controls, applied to receiver and render scenarios.
     pub receive: ReceiveGraphConfig,
     /// Deterministic virtual forwarding; enabled faults require roundtrip coverage.
     pub transport: crate::TransportConfig,
@@ -89,7 +91,9 @@ pub struct RunConfig {
     pub clocks: crate::ClockConfig,
     /// Source counts/gain/work budget for the render-only stress scenario.
     pub mix_stress: crate::MixStressConfig,
-    /// Maximum input WAV bytes, 1..=268435456.
+    /// External packet-recording resource budgets; no devices or network are opened.
+    pub receive_simulation: crate::ReceiveSimulationConfig,
+    /// Maximum input bytes, 1..=268435456; packet JSON also has a hard 32 MiB cap.
     pub max_input_bytes: u64,
     /// Maximum interleaved decoded input or output samples, each 1..=67108864.
     pub max_pcm_samples: usize,
@@ -115,6 +119,7 @@ impl Default for RunConfig {
             transport: Default::default(),
             clocks: Default::default(),
             mix_stress: Default::default(),
+            receive_simulation: Default::default(),
             max_input_bytes: 64 * 1024 * 1024,
             max_pcm_samples: 16 * 1024 * 1024,
             max_trace_events: 4096,
@@ -147,11 +152,11 @@ pub struct Stage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlan {
-    /// Selected file scenario.
+    /// Selected offline scenario.
     pub scenario: Scenario,
-    /// capture-subchain, virtual-roundtrip or render-stress; never server E2E.
+    /// capture-subchain, virtual-roundtrip, render-stress or receiver-replay; never server E2E.
     pub coverage: String,
-    /// Actual WAV input format.
+    /// Actual WAV input or negotiated packet decoder format; plan stages distinguish them.
     pub input_format: AudioFormat,
     /// Capture/codec format, 48 kHz mono voice or stereo desktop.
     pub capture_format: AudioFormat,
@@ -161,13 +166,13 @@ pub struct ExecutionPlan {
     pub stages: Vec<Stage>,
 }
 impl RunConfig {
-    /// Shared scenario defaults; render-only stress explicitly bypasses voice APM.
+    /// Shared scenario defaults; render stress and receiver replay disable capture APM.
     pub fn for_scenario(scenario: Scenario) -> Self {
         let mut config = Self {
             scenario,
             ..Default::default()
         };
-        if scenario == Scenario::MixStress {
+        if matches!(scenario, Scenario::MixStress | Scenario::ReceiveSimulation) {
             config.processing.enabled = false;
         }
         config
@@ -178,7 +183,11 @@ impl RunConfig {
         if self.processing.enabled && !cfg!(feature = "processing-sonora") {
             return Err(Error::Capability("processing-sonora".into()));
         }
-        if self.scenario == Scenario::FileRoundtrip && !cfg!(feature = "codec-opus") {
+        if matches!(
+            self.scenario,
+            Scenario::FileRoundtrip | Scenario::ReceiveSimulation
+        ) && !cfg!(feature = "codec-opus")
+        {
             return Err(Error::Capability("codec-opus".into()));
         }
         Ok(())
@@ -187,6 +196,7 @@ impl RunConfig {
         self.transport.validate()?;
         self.clocks.validate()?;
         self.mix_stress.validate()?;
+        self.receive_simulation.validate()?;
         if self.scenario != Scenario::FileRoundtrip
             && (self.transport.is_impaired() || self.clocks.is_shifted())
         {
@@ -224,6 +234,9 @@ impl RunConfig {
                 "mix stress bypasses APM and must fit render source admission".into(),
             ));
         }
+        if self.scenario == Scenario::ReceiveSimulation && self.processing.enabled {
+            return Err(Error::Invalid("receiver input has no capture APM".into()));
+        }
         if self.processing.adaptive_gain && !self.processing.gain_controller2 {
             return Err(Error::Invalid("adaptive gain requires AGC2".into()));
         }
@@ -259,12 +272,16 @@ impl RunConfig {
                 "virtual output needs an integral 10 ms quantum".into(),
             ));
         }
-        if self.scenario == Scenario::FileRoundtrip {
+        if matches!(
+            self.scenario,
+            Scenario::FileRoundtrip | Scenario::ReceiveSimulation
+        ) {
             self.receive
                 .validate_stream(self.ptime)
                 .map_err(|e| Error::Invalid(e.to_string()))?;
-            if u64::from(self.bitrate_bps) * u64::from(self.ptime.milliseconds())
-                > self.max_payload_bytes as u64 * 8000
+            if self.scenario == Scenario::FileRoundtrip
+                && u64::from(self.bitrate_bps) * u64::from(self.ptime.milliseconds())
+                    > self.max_payload_bytes as u64 * 8000
             {
                 return Err(Error::Invalid(
                     "payload cannot hold requested bitrate; no silent quality reduction".into(),
@@ -297,25 +314,47 @@ impl RunConfig {
             },
         )?;
         let roundtrip = self.scenario == Scenario::FileRoundtrip;
+        let packet_input = self.scenario == Scenario::ReceiveSimulation;
         let render = self.scenario != Scenario::FileProcessing;
+        if packet_input && input != capture {
+            return Err(Error::Invalid(
+                "packet decoder format must match negotiated profile".into(),
+            ));
+        }
         let mut stages = vec![
             Stage {
                 id: "channel_map".into(),
-                status: NodeStatus::Applied,
+                status: if packet_input {
+                    NodeStatus::NotCovered
+                } else {
+                    NodeStatus::Applied
+                },
             },
             Stage {
                 id: "capture_resample".into(),
-                status: NodeStatus::Applied,
+                status: if packet_input {
+                    NodeStatus::NotCovered
+                } else {
+                    NodeStatus::Applied
+                },
             },
             Stage {
                 id: "voice_apm".into(),
-                status: if self.processing.enabled {
+                status: if packet_input {
+                    NodeStatus::NotCovered
+                } else if self.processing.enabled {
                     NodeStatus::Applied
                 } else {
                     NodeStatus::Bypassed
                 },
             },
         ];
+        if packet_input {
+            stages.push(Stage {
+                id: "packet_input".into(),
+                status: NodeStatus::Applied,
+            });
+        }
         for id in [
             "packetizer",
             "opus_encode",
@@ -338,7 +377,10 @@ impl RunConfig {
                     | "master_limiter"
                     | "source_clock_correction"
             );
-            let status = if !(roundtrip || render && is_render_node) {
+            let status = if !(roundtrip
+                || render && is_render_node
+                || packet_input && matches!(id, "encoded_jitter" | "opus_decode"))
+            {
                 NodeStatus::NotCovered
             } else if id == "source_clock_correction"
                 && (self.receive.render.max_source_clock_correction_ppm == 0
@@ -366,7 +408,9 @@ impl RunConfig {
         }
         Ok(ExecutionPlan {
             scenario: self.scenario,
-            coverage: if self.scenario == Scenario::MixStress {
+            coverage: if packet_input {
+                "receiver-replay"
+            } else if self.scenario == Scenario::MixStress {
                 "render-stress"
             } else if roundtrip {
                 "virtual-roundtrip"
@@ -383,5 +427,30 @@ impl RunConfig {
             },
             stages,
         })
+    }
+    pub(crate) fn input_artifact(&self) -> &'static str {
+        if self.scenario == Scenario::ReceiveSimulation {
+            "packets.json"
+        } else {
+            "input.wav"
+        }
+    }
+    pub(crate) fn input_byte_limit(&self) -> u64 {
+        if self.scenario == Scenario::ReceiveSimulation {
+            self.max_input_bytes.min(crate::io::JSON_LIMIT)
+        } else {
+            self.max_input_bytes
+        }
+    }
+    pub(crate) fn reproduction(&self, stats: &serde_json::Value) -> &'static str {
+        if !self.retain_input {
+            "metadata-only"
+        } else if self.scenario != Scenario::ReceiveSimulation {
+            "signal-replay"
+        } else if stats["packet_recording"]["complete_material"] == true {
+            "packet-replay"
+        } else {
+            "partial-packet-replay"
+        }
     }
 }

@@ -32,10 +32,21 @@ impl Cancellation {
 /// Bounded-rate progress delivered on the runner thread, never a device callback.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProgressEvent {
-    /// Input frames consumed, per channel.
+    /// Completed work; legacy field name, interpreted using unit.
     pub input_frames: u64,
-    /// Total source frames.
+    /// Total work; legacy field name, interpreted using unit.
     pub total_frames: u64,
+    /// Explicit count unit; encoded records must not be mislabeled as PCM frames.
+    pub unit: ProgressUnit,
+}
+/// Work-count domain for progress; separate from signal/sample clock domains.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressUnit {
+    /// Native per-channel input PCM frames.
+    InputFrames,
+    /// Supplied packet records, including records with unavailable payloads.
+    PacketRecords,
 }
 #[derive(Default)]
 struct Execution {
@@ -131,6 +142,7 @@ impl RenderTotals {
 }
 struct Work {
     run_id: String,
+    source_identity: (u64, u16, u64),
     output: Vec<f32>,
     trace: Vec<TraceEvent>,
     dropped: u64,
@@ -153,6 +165,7 @@ impl Work {
     fn new(run_id: String) -> Self {
         Self {
             run_id,
+            source_identity: (1, 1, 1),
             output: Vec::new(),
             trace: Vec::new(),
             dropped: 0,
@@ -218,17 +231,17 @@ impl Work {
             source_id: if stage == "render_output" {
                 None
             } else {
-                Some(1)
+                Some(self.source_identity.0)
             },
             stream_id: if stage == "render_output" {
                 None
             } else {
-                Some(1)
+                Some(self.source_identity.1)
             },
             epoch: if stage == "render_output" {
                 None
             } else {
-                Some(1)
+                Some(self.source_identity.2)
             },
             config_generation: 1,
             metrics,
@@ -297,6 +310,8 @@ enum Prepared {
     Mix(Box<MixGraphs>),
     #[cfg(feature = "codec-opus")]
     Roundtrip(Box<RoundtripGraphs>),
+    #[cfg(feature = "codec-opus")]
+    Receive(Box<ReceiveGraphs>),
 }
 
 struct MixGraphs {
@@ -340,8 +355,35 @@ struct RoundtripGraphs {
     receive: audiokit::graph::receive::ReceiveGraph,
     source: audiokit::graph::render::SourceRegistration,
 }
+#[cfg(feature = "codec-opus")]
+struct ReceiveGraphs {
+    receive: audiokit::graph::receive::ReceiveGraph,
+    source: audiokit::graph::render::SourceRegistration,
+}
 
-fn prepare(config: &RunConfig, plan: &ExecutionPlan) -> Result<Prepared> {
+#[cfg(feature = "codec-opus")]
+fn prepare_receive(
+    config: &RunConfig,
+    source: audiokit::graph::render::SourceRegistration,
+) -> Result<ReceiveGraphs> {
+    let mut receive = audiokit::graph::receive::ReceiveGraph::new(config.receive)?;
+    receive.register(
+        source,
+        Box::new(audiokit_codec_opus::OpusDecoder::new(
+            source.format,
+            config.ptime,
+        )?),
+    )?;
+    Ok(ReceiveGraphs { receive, source })
+}
+
+fn prepare(
+    config: &RunConfig,
+    plan: &ExecutionPlan,
+    source: Option<audiokit::graph::render::SourceRegistration>,
+) -> Result<Prepared> {
+    #[cfg(not(feature = "codec-opus"))]
+    let _ = source;
     match config.scenario {
         Scenario::FileProcessing => Ok(Prepared::Pcm(Box::new(CapturePcmGraph::new(
             frontend_config(config, plan),
@@ -354,6 +396,26 @@ fn prepare(config: &RunConfig, plan: &ExecutionPlan) -> Result<Prepared> {
             #[cfg(feature = "codec-opus")]
             {
                 prepare_roundtrip(config, plan).map(|graphs| Prepared::Roundtrip(Box::new(graphs)))
+            }
+            #[cfg(not(feature = "codec-opus"))]
+            {
+                Err(Error::Capability("codec-opus".into()))
+            }
+        }
+        Scenario::ReceiveSimulation => {
+            #[cfg(feature = "codec-opus")]
+            {
+                use audiokit::{SourceId, SourceKey, StreamEpoch, StreamId};
+                let source = source.unwrap_or(audiokit::graph::render::SourceRegistration {
+                    key: SourceKey {
+                        source: SourceId::new(1)?,
+                        stream: StreamId::new(1)?,
+                    },
+                    epoch: StreamEpoch(1),
+                    format: plan.capture_format,
+                    kind: config.stream,
+                });
+                prepare_receive(config, source).map(|graphs| Prepared::Receive(Box::new(graphs)))
             }
             #[cfg(not(feature = "codec-opus"))]
             {
@@ -459,6 +521,7 @@ fn mix_file(
                 progress(ProgressEvent {
                     input_frames: graphs.frontend.statistics().input_frames,
                     total_frames,
+                    unit: ProgressUnit::InputFrames,
                 });
             }
         }
@@ -502,7 +565,7 @@ fn mix_file(
 
 pub(crate) fn validate_plan(config: &RunConfig, plan: &ExecutionPlan) -> Result<()> {
     // Construct the same owned graph as run, but never process or persist audio.
-    drop(prepare(config, plan)?);
+    drop(prepare(config, plan, None)?);
     Ok(())
 }
 
@@ -546,6 +609,7 @@ fn process_file(
                 progress(ProgressEvent {
                     input_frames: graph.statistics().input_frames,
                     total_frames,
+                    unit: ProgressUnit::InputFrames,
                 });
             }
         }
@@ -760,6 +824,7 @@ fn roundtrip(
                 progress(ProgressEvent {
                     input_frames: capture.statistics().input_frames,
                     total_frames,
+                    unit: ProgressUnit::InputFrames,
                 });
             }
         }
@@ -841,7 +906,149 @@ fn roundtrip(
     result
 }
 
-/// Runs a validated file scenario in a new output directory and finalizes its bundle.
+#[cfg(feature = "codec-opus")]
+fn receive_recording(
+    config: &RunConfig,
+    trace: crate::PacketTrace,
+    stop: &Cancellation,
+    progress: &mut impl FnMut(ProgressEvent),
+    work: &mut Work,
+    graphs: Box<ReceiveGraphs>,
+) -> Result<()> {
+    use audiokit::graph::receive::EncodedPacket;
+    let ReceiveGraphs {
+        mut receive,
+        source,
+    } = *graphs;
+    work.source_identity = (
+        trace.source.source_id,
+        trace.source.stream_id,
+        trace.source.epoch,
+    );
+    let recording = trace.summary();
+    let packet_count = trace.packets.len();
+    let mut packets = trace.packets.into_iter().peekable();
+    let mut processed = 0_u64;
+    let mut admitted = 0_u64;
+    let mut missing = 0_u64;
+    let mut output = vec![
+        0.0;
+        config.receive.render.format.sample_rate_hz() as usize / 100
+            * usize::from(config.receive.render.format.channels())
+    ];
+    let mut previous = 0;
+    let result = (|| {
+        for (index, now) in trace.render_ticks_ns.into_iter().enumerate() {
+            if stop.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            while packets.peek().is_some_and(|p| p.arrival_ns <= now) {
+                if stop.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let packet = packets.next().expect("peeked packet");
+                let frames = u64::from(source.format.sample_rate_hz())
+                    * u64::from(packet.duration.milliseconds())
+                    / 1000;
+                let range = packet.media_frame.map_or((0, 0), |first| (first, frames));
+                let clock = if packet.media_frame.is_some() {
+                    "recorded_media"
+                } else {
+                    "media_position_unknown"
+                };
+                let payload_present = packet.payload.is_some();
+                let outcome = match packet.payload {
+                    Some(payload) => {
+                        let outcome = receive.push_packet(EncodedPacket {
+                            source: source.key,
+                            epoch: source.epoch,
+                            sequence: packet.sequence,
+                            duration: packet.duration,
+                            arrival_ns: packet.arrival_ns,
+                            payload,
+                        })?;
+                        admitted += 1;
+                        json!(outcome)
+                    }
+                    None => {
+                        missing += 1;
+                        json!("payload_unavailable")
+                    }
+                };
+                work.event("packet_input", clock, packet.arrival_ns, range,
+                    json!({"record_ordinal":processed,"sequence":packet.sequence,"duration_ms":packet.duration.milliseconds(),
+                        "payload_present":payload_present,"outcome":outcome,"observed_by_callback_ns":now}),config)?;
+                processed += 1;
+            }
+            // Recorded arrival and demand clocks are preserved. No periodic tick
+            // is inserted to hide a captured pause or missing demand interval.
+            let budget = now - previous;
+            let started = Instant::now();
+            let metrics = receive.render_into(&mut output, now);
+            let elapsed = work.receive_execution.record_budget(started, budget);
+            let metrics = metrics?;
+            work.render_totals.observe(&metrics);
+            work.last_source_clocks = json!(receive.clock_metrics());
+            work.append(&output, config)?;
+            work.event(
+                "render_output",
+                "virtual_output",
+                now,
+                (metrics.sample_position, metrics.frames),
+                render_evidence(&metrics, elapsed, budget),
+                config,
+            )?;
+            previous = now;
+            if index % 10 == 0 {
+                progress(ProgressEvent {
+                    input_frames: processed,
+                    total_frames: packet_count as u64,
+                    unit: ProgressUnit::PacketRecords,
+                });
+            }
+        }
+        // Supplied packet EOF is not a real connection-close observation. Drain
+        // is a separately declared synthetic tail, outside recorded demand stats.
+        for _ in 0..1000 {
+            if stop.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            previous += 10_000_000;
+            let started = Instant::now();
+            let frames = receive.drain_into(&mut output, previous);
+            work.receive_execution.record(started);
+            let frames = frames?;
+            if frames == 0 {
+                return Ok(());
+            }
+            work.append(
+                &output[..frames as usize * usize::from(config.receive.render.format.channels())],
+                config,
+            )?;
+        }
+        Err(Error::Execution(
+            "recorded receiver drain exceeded deadline".into(),
+        ))
+    })();
+    let stats = receive.statistics();
+    work.stats = json!({"capture":null,"receive":stats,"packet_recording":recording,
+        "packet_replay":{"processed_records":processed,"submitted_payloads":admitted,"missing_payloads":missing,
+            "pending_records":packet_count as u64 - processed,"input_pcm_frames":null,
+            "drain":"synthetic after supplied recording; not captured device tail"},
+        "last_steady_source_clocks":work.last_source_clocks,"steady_render":work.render_totals,
+        "render_totals_scope":"recorded ordinary demand only; synthetic drain excluded"});
+    if result.is_err() {
+        receive.abort();
+    }
+    result
+}
+
+enum InputMaterial {
+    Pcm(Vec<f32>),
+    Packets(crate::PacketTrace),
+}
+
+/// Runs validated WAV or packet material in a new directory and finalizes its bundle.
 ///
 /// `retain_input` is explicit input-audio sharing consent. Output WAV is the
 /// requested test recording. Existing directories are never overwritten. On
@@ -855,7 +1062,7 @@ pub fn run(
     mut progress: impl FnMut(ProgressEvent),
 ) -> Result<Diagnostics> {
     config.validate()?;
-    let raw = io::bytes(input, config.max_input_bytes)?;
+    let raw = io::bytes(input, config.input_byte_limit())?;
     run_bytes(config, raw, output_dir, stop, &mut progress, None)
 }
 pub(crate) fn run_bytes(
@@ -867,14 +1074,28 @@ pub(crate) fn run_bytes(
     replay_origin: Option<ReplayOrigin>,
 ) -> Result<Diagnostics> {
     config.validate()?;
-    let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
-    validate_source_budget(config, format, pcm.len())?;
+    let (format, input_frames, material) = if config.scenario == Scenario::ReceiveSimulation {
+        let trace = crate::packet_trace::parse(&raw, config)?;
+        (trace.source.format, 0, InputMaterial::Packets(trace))
+    } else {
+        let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
+        validate_source_budget(config, format, pcm.len())?;
+        (
+            format,
+            format.frames_in(pcm.len())?.get(),
+            InputMaterial::Pcm(pcm),
+        )
+    };
     let plan = config.plan(format)?;
-    let prepared = prepare(config, &plan)?;
+    let source = match &material {
+        InputMaterial::Packets(trace) => Some(trace.source.registration()?),
+        InputMaterial::Pcm(_) => None,
+    };
+    let prepared = prepare(config, &plan, source)?;
     std::fs::create_dir(output_dir)?;
     io::write_json(&output_dir.join("config.json"), config)?;
     if config.retain_input {
-        io::write_new(&output_dir.join("input.wav"), &raw)?;
+        io::write_new(&output_dir.join(config.input_artifact()), &raw)?;
     }
     static ID: AtomicU64 = AtomicU64::new(0);
     let run_id = format!(
@@ -887,17 +1108,22 @@ pub(crate) fn run_bytes(
         ID.fetch_add(1, Ordering::Relaxed)
     );
     let mut work = Work::new(run_id.clone());
-    let result = match prepared {
-        Prepared::Mix(graphs) => {
+    let result = match (prepared, material) {
+        (Prepared::Mix(graphs), InputMaterial::Pcm(pcm)) => {
             mix_file(config, &plan, &pcm, stop, &mut progress, &mut work, graphs)
         }
-        Prepared::Pcm(graph) => {
+        (Prepared::Pcm(graph), InputMaterial::Pcm(pcm)) => {
             process_file(config, &plan, &pcm, stop, &mut progress, &mut work, graph)
         }
         #[cfg(feature = "codec-opus")]
-        Prepared::Roundtrip(graphs) => {
+        (Prepared::Roundtrip(graphs), InputMaterial::Pcm(pcm)) => {
             roundtrip(config, &plan, &pcm, stop, &mut progress, &mut work, graphs)
         }
+        #[cfg(feature = "codec-opus")]
+        (Prepared::Receive(graphs), InputMaterial::Packets(trace)) => {
+            receive_recording(config, trace, stop, &mut progress, &mut work, graphs)
+        }
+        _ => Err(Error::Invalid("input material/graph mismatch".into())),
     };
     let mut analyzer = AudioSignalAnalyzer::new(Default::default());
     let mut signal = AudioSignalStats::default();
@@ -954,7 +1180,10 @@ pub(crate) fn run_bytes(
         checks.push(Check { id: "silence_not_active".into(), passed: max_active <= config.mix_stress.sources - config.mix_stress.silent_sources,
             detail: "exact-silent registered sources never increase the energy-active source count; normalization equivalence needs paired runs".into() });
     }
-    if config.scenario == Scenario::FileRoundtrip {
+    if matches!(
+        config.scenario,
+        Scenario::FileRoundtrip | Scenario::ReceiveSimulation
+    ) {
         let receive = &work.stats["receive"];
         checks.push(Check {
             id: "received_media".into(),
@@ -967,6 +1196,18 @@ pub(crate) fn run_bytes(
             passed: receive["decode_errors"] == 0,
             detail: "production decoder did not report corrupt/backend failures".into(),
         });
+    }
+    if config.scenario == Scenario::ReceiveSimulation {
+        checks.push(Check { id:"packet_material_complete".into(),
+            passed:work.stats["packet_recording"]["complete_material"] == true,
+            detail:"declared cold-start recording with no missing payloads/arrivals/demands; not proof of hardware capture completeness".into() });
+        checks.push(Check { id:"packet_arrival_accounting".into(),
+            passed:work.stats["packet_replay"]["pending_records"] == 0
+                && work.stats["packet_replay"]["processed_records"] == work.stats["packet_recording"]["packets"],
+            detail:"all supplied arrival records processed, including explicit unavailable payload records".into() });
+    }
+    if config.scenario == Scenario::FileRoundtrip {
+        let receive = &work.stats["receive"];
         let transport = &work.stats["transport"];
         checks.push(Check {
             id: "transport_accounting".into(),
@@ -1009,16 +1250,16 @@ pub(crate) fn run_bytes(
         effective_config: config.clone(),
         plan: plan.clone(),
         input_sha256: io::hash(&raw),
-        input_frames: format.frames_in(pcm.len())?.get(),
+        input_frames,
         output_frames: plan.output_format.frames_in(work.output.len())?.get(),
         output_signal: json!(signal),
         graph_statistics: work.stats.clone(),
         latency: json!({"capture_execution":work.capture_execution.value(), "receive_execution":work.receive_execution.value(),
-            "capture_resampler":{"classification":"estimated", "method":"production backend group delay", "clock":"capture_output", "frames":capture["resampler_delay_frames"]},
-            "processor":{"classification":if config.processing.enabled {"unknown"} else {"bypassed"}, "frames":capture["processing_delay_frames"], "reason":if config.processing.enabled {"Sonora does not expose algorithmic delay"} else {"bypassed"}},
+            "capture_resampler":{"classification":if config.scenario == Scenario::ReceiveSimulation {"not_covered"} else {"estimated"}, "method":"production backend group delay", "clock":"capture_output", "frames":capture["resampler_delay_frames"]},
+            "processor":{"classification":if config.scenario == Scenario::ReceiveSimulation {"not_covered"} else if config.processing.enabled {"unknown"} else {"bypassed"}, "frames":capture["processing_delay_frames"], "reason":if config.scenario == Scenario::ReceiveSimulation {"receiver-only input"} else if config.processing.enabled {"Sonora does not expose algorithmic delay"} else {"bypassed"}},
             "encoder":{"classification":if config.scenario == Scenario::FileRoundtrip {"estimated"} else {"not_covered"}, "clock":"capture_output", "frames":capture["encoder_lookahead_frames"]},
             "packetization":{"classification":if config.scenario == Scenario::FileRoundtrip {"configured"} else {"not_covered"}, "ptime_ms":if config.scenario == Scenario::FileRoundtrip {Some(config.ptime.milliseconds())} else {None}, "reason":"not a constant per-sample end-to-end delay"},
-            "encoded_startup":{"classification":if config.scenario == Scenario::FileRoundtrip {"configured"} else {"not_covered"}, "target_ms":if config.scenario == Scenario::FileRoundtrip {Some(config.receive.jitter.target_ms)} else {None}},
+            "encoded_startup":{"classification":if matches!(config.scenario, Scenario::FileRoundtrip | Scenario::ReceiveSimulation) {"configured"} else {"not_covered"}, "target_ms":if matches!(config.scenario, Scenario::FileRoundtrip | Scenario::ReceiveSimulation) {Some(config.receive.jitter.target_ms)} else {None}},
             "render_algorithms":{"classification":if config.scenario != Scenario::FileProcessing {"estimated"} else {"not_covered"}, "method":"production per-stage frame delays; no double-counted total", "clock":"virtual_output", "source_limiter_frames":work.render_totals.source_lookahead_frames, "master_limiter_frames":work.render_totals.master_lookahead_frames, "source_resampler_frames":work.render_totals.source_resampler_delay_frames},
             "virtual_forwarding":{"classification":if config.scenario == Scenario::FileRoundtrip {"simulated"} else {"not_covered"}, "clock":"virtual_host", "max_delivery_delay_ns":work.stats["transport"]["max_delivery_delay_ns"], "method":"scheduled delivery time minus emission; not measured server/network latency; callback observation may be up to 10 ms later"},
             "device":{"classification":"unknown", "reason":"no devices opened"}, "server_forwarding":{"classification":"unknown", "reason":"no server in this scenario"},
@@ -1052,9 +1293,9 @@ pub(crate) fn run_bytes(
         "diagnostics.json",
         "trace.json",
         "processed.wav",
-        "input.wav",
+        config.input_artifact(),
     ] {
-        if name == "input.wav" && !config.retain_input {
+        if name == config.input_artifact() && !config.retain_input {
             continue;
         }
         let data = io::bytes(&output_dir.join(name), 512 * 1024 * 1024)?;
@@ -1082,20 +1323,26 @@ pub(crate) fn run_bytes(
             .into(),
             backends,
             complete: result.is_ok(),
-            reproduction: if config.retain_input {
-                "signal-replay"
-            } else {
-                "metadata-only"
-            }
-            .into(),
+            reproduction: config.reproduction(&work.stats).into(),
             input_audio_authorized: config.retain_input,
             artifacts,
         },
     )?;
     result?;
+    let (count, unit) = if config.scenario == Scenario::ReceiveSimulation {
+        (
+            work.stats["packet_recording"]["packets"]
+                .as_u64()
+                .unwrap_or(0),
+            ProgressUnit::PacketRecords,
+        )
+    } else {
+        (diagnostics.input_frames, ProgressUnit::InputFrames)
+    };
     progress(ProgressEvent {
-        input_frames: diagnostics.input_frames,
-        total_frames: diagnostics.input_frames,
+        input_frames: count,
+        total_frames: count,
+        unit,
     });
     Ok(diagnostics)
 }
