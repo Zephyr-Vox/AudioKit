@@ -1,5 +1,6 @@
 //! Synchronous production graphs. Hosts supply codecs/processing and own scheduling/transport.
 pub mod capture;
+pub mod capture_pcm;
 pub mod receive;
 pub mod render;
 

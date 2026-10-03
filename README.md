@@ -76,7 +76,23 @@ cargo run -p audiokit --release --example render_budget --offline
 ```
 
 See `docs/host-integration.md` for worker ownership and timing contracts.
-The testkit crate and CLI/Slint application have not been started (A5 boundary).
+The first A5 testkit/CLI slice is available; see `docs/testkit.md` for file scenarios,
+diagnostic bundle export, integrity checks, analysis and signal replay. Slint, native
+device scenarios, fault injection and the server host bridge are still pending.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
 is implied by the deterministic tests in this workspace.
+
+## Debugging CLI
+
+```sh
+cargo run -p audiokit-test --release --offline --locked -- list-scenarios --json
+cargo run -p audiokit-test --release --offline --locked -- run --config configs/desktop-roundtrip.json --input /path/to/input.wav --out-dir target/desktop-001 --quiet
+cargo run -p audiokit-test --release --offline --locked -- analyze --bundle target/desktop-001 --json
+```
+
+Output is float32 WAV plus a versioned diagnostic bundle. Source audio is not
+included unless `--retain-input` is explicitly supplied. The PCM-only scenario
+shares the production capture frontend and does not roundtrip through Opus.
+Current scenes are offline/virtual, not hardware or server E2E. Use new output
+directories; existing files are never overwritten.

@@ -1,0 +1,28 @@
+[package]
+name = "audiokit-testkit"
+description = "Reproducible production audio scenarios and diagnostic bundles"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+processing-sonora = ["dep:audiokit-processing-sonora"]
+codec-opus = ["dep:audiokit-codec-opus"]
+
+[dependencies]
+audiokit = { path = "../audiokit" }
+audiokit-processing-sonora = { path = "../audiokit-processing-sonora", optional = true }
+audiokit-codec-opus = { path = "../audiokit-codec-opus", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+hound.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
+
+[lints]
+workspace = true

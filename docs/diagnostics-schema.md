@@ -1,0 +1,86 @@
+# Diagnostic Bundle Schema 1
+
+This schema belongs to AudioKit testkit. It does not reinterpret older CLI mic
+reports or `audio.diagnostics` snapshots. Every import checks version 1 and rejects
+unknown versions. Rust serde models and shared validators are authoritative;
+unknown config/report fields are rejected rather than silently ignored.
+
+## Files and Identity
+
+`manifest.json` references exactly `config.json`, `diagnostics.json`, `trace.json`
+and `processed.wav`, plus optional explicitly authorized `input.wav`. Artifact
+paths are fixed relative filenames; sizes and SHA256 are validated before parsing.
+Missing, duplicate, unexpected, escaping or tampered artifacts fail import. Reads
+have absolute byte/sample limits even when the manifest is untrusted.
+
+Manifest contains run ID, revision, Rust/TOML/lockfile source digest (including
+uncommitted files), OS/arch/build profile and compiled backends. It records run
+completion separately from checks and recording authorization. Hash integrity is
+not producer authentication. `signal-replay` means source WAV was included;
+`metadata-only` requires an externally supplied original hash-matching WAV to replay.
+Hardware and packet replay are not implemented by schema 1's file scenarios.
+
+`config.json` contains validated effective run controls and resource budgets, no
+local input filename. `diagnostics.json` retains requested/effective controls,
+plan, input hash, per-channel input/output frames, signal measurements, graph
+accounting, latency, checks, unavailable observations and optional error. Replay
+records `replay_origin` with original identity/status/source/build change; it does
+not reproduce a previous cancellation or physical callback schedule.
+
+Status is `completed`, `cancelled` or `failed`. Completion does not imply every
+check passed. A partial package can still have valid file hashes and a finalized
+partial WAV. Disk failures may prevent a complete package; the operation fails
+explicitly. PCM is float32 and retains pipeline leading latency/tail, not an
+automatically level-normalized or trimmed listening version.
+
+## Coverage and Trace
+
+ExecutionPlan declares actual input/capture/output formats and ordered stable
+stage IDs. Status `applied`, `bypassed`, `not_covered` describes node coverage, not
+quality. The importer recomputes the expected file plan from config and input
+format without requiring optional backends just to inspect a package. Current
+coverage levels are `capture-subchain` and `virtual-roundtrip`, never server E2E.
+
+Trace is a JSON array of bounded snapshots. Every event contains run ID, ordinal,
+kind/stage, first_frame/frames, anonymous source/stream/epoch when applicable,
+config generation, metrics, sample clock domain, time_ns and its distinct
+time_clock_domain. A mixed render boundary has no single source identity; its
+production metrics contain per-source records. All initial scenarios use virtual
+host nanoseconds for scheduling, not DSP CPU time or synchronized remote time.
+Encoded-out samples use the capture output clock; final PCM uses virtual output.
+
+Events are a retained prefix. Attempted = retained + dropped; ordinals are
+consecutive from zero; first_dropped_ordinal is null with no loss, otherwise the
+retained length. Event cap and serialized-payload byte cap apply independently.
+Pretty formatting has bounded additional framing. Loss never implies a healthy
+unobserved interval. Counters use checked arithmetic on import. Internal PCM taps,
+exact packet dependency tracing and drain snapshots remain unavailable.
+
+## Metrics and Latency
+
+Per-channel frames are never interleaved sample counts. Production signal values
+currently use Q15 units: peak/true-peak amplitude divided by 32768 is normalized
+amplitude. Full-scale and delta-candidate counts are not proof of audible clipping
+or clicks. The estimated true-peak analyzer is not the independent oracle.
+EOF filter, processor-quantum and packet padding have different fields/domains.
+
+Receive counters cover accepted/decoded packets, late/duplicate/reset/FEC/PLC and
+errors. Codec payload totals include EOF packets and observed bit/s over encoded
+media duration; this excludes transport headers and may differ from a VBR target.
+Ordinary-demand render totals retain missing frames, queue maximum,
+limiter clamps/attenuation and bounded correction even if trace truncates. Drain
+metrics are not in that aggregate. Last ordinary source-clock snapshot is retained
+before drain retires the source; it is inferred from virtual arrivals, not a
+measured remote device clock.
+
+Latency records identify measured execution, estimated backend algorithmic frames,
+configured ptime/startup or unknown/not-covered/bypassed stages. Empty timing sets
+have null total/max, not a fabricated zero. p50/p95/p99 remain null until bounded
+histograms land. CPU durations exclude trace serialization, artifact I/O and
+post-run analysis. Device/server and aligned E2E delay are unknown. No sum is
+reported that double-counts parallel work, buffering or codec/group delays.
+
+`analyze` reports integrity-verified recorded checks and evidence limitations, not
+a root-cause certainty score. `compare` compares input/config/coverage/waveform/
+checks/build and preserves both original packages. Timing fields and run IDs are
+not compared as deterministic audio content.

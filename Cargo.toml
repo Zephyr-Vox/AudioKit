@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/audiokit", "crates/audiokit-processing-sonora", "crates/audiokit-codec-opus", "crates/audiokit-platform"]
+members = ["crates/audiokit", "crates/audiokit-processing-sonora", "crates/audiokit-codec-opus", "crates/audiokit-platform", "crates/audiokit-testkit", "crates/audiokit-test"]
 resolver = "3"
 
 [workspace.package]
@@ -17,6 +17,9 @@ opus = "=0.4.0"
 rubato = "=4.0.0"
 audioadapter-buffers = "=4.0.0"
 cpal = "=0.18.2"
+hound = "=3.5.1"
+sha2 = "=0.10.9"
+ctrlc = "=3.4.7"
 
 [workspace.lints.rust]
 missing_docs = "deny"

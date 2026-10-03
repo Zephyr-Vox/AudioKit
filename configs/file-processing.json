@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "scenario": "file-processing",
+  "stream": "voice",
+  "processing": {
+    "enabled": true,
+    "noise_suppression": "moderate",
+    "high_pass_filter": true,
+    "gain_controller2": true,
+    "adaptive_gain": false,
+    "aec": false
+  },
+  "retain_input": false
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "scenario": "file-roundtrip",
+  "stream": "desktop",
+  "processing": { "enabled": false },
+  "ptime": 20,
+  "bitrate_bps": 196000,
+  "max_payload_bytes": 4000,
+  "retain_input": false
+}

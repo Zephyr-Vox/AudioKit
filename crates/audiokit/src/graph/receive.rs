@@ -71,6 +71,19 @@ impl Default for ReceiveGraphConfig {
     }
 }
 impl ReceiveGraphConfig {
+    /// Validates per-stream FIFO capacity using the same rule as decoder admission.
+    /// A stream must fit maximum render demand, its fixed ptime and filter/rate headroom.
+    pub fn validate_stream(&self, duration: PacketDuration) -> AudioResult<()> {
+        self.validate()?;
+        if self.render.max_source_queue_ms
+            < self.render.max_render_ms + duration.milliseconds() + 30
+        {
+            return Err(AudioError::InvalidConfig(
+                "source FIFO needs maximum demand plus ptime and 30 ms filter/rate headroom".into(),
+            ));
+        }
+        Ok(())
+    }
     /// Validates all capacities and real-time work limits before graph construction.
     pub fn validate(self) -> AudioResult<Self> {
         self.render.validate()?;
@@ -253,13 +266,7 @@ impl ReceiveGraph {
             ));
         }
         let duration = decoder.packet_duration();
-        if self.config.render.max_source_queue_ms
-            < self.config.render.max_render_ms + duration.milliseconds() + 30
-        {
-            return Err(AudioError::InvalidConfig(
-                "source FIFO needs maximum demand plus ptime and 30 ms filter/rate headroom".into(),
-            ));
-        }
+        self.config.validate_stream(duration)?;
         let pcm = vec![
             0.0;
             duration

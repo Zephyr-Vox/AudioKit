@@ -120,6 +120,33 @@ Correction precedes both limiters. Missing-slot disturbances freeze adaptation;
 host pauses/rebuffering require explicit recovery. Saturation and unavailable
 estimates are observable, and unknown time is not serialized as zero latency.
 
+## Shared Capture Frontend and Offline Runner
+
+`CapturePcmGraph` owns the same channel map, continuous filter and optional Sonora
+state previously owned directly by `CaptureGraph`. The packet graph delegates
+to it, then exclusively packetizes/encodes returned PCM. Its PCM-only consumer
+never invokes a dummy codec: EOF pads an enabled 10 ms processor quantum but not
+an absent Opus packet. Original preflight input errors leave history untouched;
+advanced processor/filter failures are terminal. Non-finite processor output is
+rejected before entering downstream buffers. Tests independently verify chunk
+invariance, processor padding and exact same-rate bypass; existing graph/codec
+regressions preserve capture packet behavior.
+
+The file-roundtrip runner paces capture ingress and device demand on a virtual
+10 ms host clock. It does not admit an entire song into the encoded jitter queue
+at once or issue ordinary demand forever after EOF. Explicit receive drain keeps
+real queued packets and finite tails without inventing PLC. Its timelines are
+models, not OS presentation timestamps. Sample-range clocks and host-time clocks
+are distinct fields. CPU is measured only around worker calls, never by adding
+WAV I/O time to packet-ready latency. Frame-based backend delay and configured
+startup/ptime stay separate; full signal-aligned delay remains unknown.
+
+Observation storage is a capped prefix with independently retained aggregate
+receive/render statistics. Missing observations carry lost ordinals/counts and
+are not proof of healthy audio. Hash-validated source bytes, config and graph
+plans support re-execution; metadata-only traces cannot reconstruct a waveform.
+Bundle integrity is not producer authentication or an audibility classifier.
+
 ## Remaining Host Work
 
 The production CLI still contains its legacy packet scheduler/device engine:
@@ -127,5 +154,6 @@ packet-presence normalization, multiple waits, pre-enqueue reference and old map
 admission are not solved merely by building shared graphs. A6 must replace them.
 The CLI already delegates shared codecs/resampling/DSP and safe Windows activation.
 Reference-to-capture time mapping, native hotplug, duplex AEC calibration and full
-hardware drift runs remain separate verification gates. Testkit report persistence,
-event aggregation, independent output-oracle scenarios and GUI are A5 work.
+hardware drift runs remain separate verification gates. Basic offline report
+persistence and bounded snapshots are implemented. Real-time artifact workers,
+event correlation, independent output-oracle scenarios and GUI remain A5 work.

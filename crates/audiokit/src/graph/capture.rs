@@ -1,8 +1,8 @@
 //! Native PCM -> channel map -> continuous resample -> optional 10 ms voice DSP -> packetizer/codec.
 use super::GraphState;
+use super::capture_pcm::{CapturePcmConfig, CapturePcmGraph};
 use crate::backend::{AudioEncoder, VoiceProcessor};
 use crate::resample::ResamplerConfig;
-use crate::stream_resample::ContinuousResampler;
 use crate::{AudioError, AudioFormat, AudioResult, StreamKind};
 use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, time::Instant};
@@ -63,11 +63,8 @@ pub struct CapturePacket {
 pub struct CaptureGraph {
     config: CaptureGraphConfig,
     encoder: Box<dyn AudioEncoder>,
-    processor: Option<Box<dyn VoiceProcessor>>,
-    resampler: ContinuousResampler,
-    processing_fifo: VecDeque<f32>,
+    frontend: CapturePcmGraph,
     packet_fifo: VecDeque<f32>,
-    quantum_samples: usize,
     packet_samples: usize,
     packet_buffer: Vec<u8>,
     stats: CaptureGraphStats,
@@ -114,33 +111,33 @@ impl CaptureGraph {
                 "processor capture format must match encoder".into(),
             ));
         }
-        let mapped = AudioFormat::new(config.input_format.sample_rate_hz(), format.layout())?;
-        let resampler = ContinuousResampler::new(mapped, format, 10, config.resampler)?;
+        let frontend = CapturePcmGraph::new(
+            CapturePcmConfig {
+                input_format: config.input_format,
+                output_format: format,
+                kind: config.kind,
+                resampler: config.resampler,
+                max_ingress_ms: config.max_ingress_ms,
+            },
+            processor,
+        )?;
         let packet_samples = encoder
             .packet_duration()
             .frames(format)?
             .interleaved_samples(format)?;
-        let quantum_samples = crate::PacketDuration::Ms10
-            .frames(format)?
-            .interleaved_samples(format)?;
+        let frontend_stats = frontend.statistics();
         let stats = CaptureGraphStats {
-            processing_execution_ns: processor.as_ref().map(|_| 0),
-            processing_delay_frames: processor
-                .as_ref()
-                .and_then(|p| p.algorithmic_delay())
-                .map(|f| f.get()),
+            processing_execution_ns: frontend_stats.processing_execution_ns,
+            processing_delay_frames: frontend_stats.processing_delay_frames,
             encoder_lookahead_frames: encoder.lookahead().map(|f| f.get()),
-            resampler_delay_frames: resampler.accounting().delay_frames as u64,
+            resampler_delay_frames: frontend_stats.resampler_delay_frames,
             ..Default::default()
         };
         Ok(Self {
             config,
             encoder,
-            processor,
-            resampler,
-            processing_fifo: VecDeque::new(),
+            frontend,
             packet_fifo: VecDeque::new(),
-            quantum_samples,
             packet_samples,
             packet_buffer: vec![0; config.max_payload_bytes],
             stats,
@@ -157,40 +154,30 @@ impl CaptureGraph {
     }
     /// Returns cumulative signal/execution/delay accounting without PCM or credentials.
     pub fn statistics(&self) -> CaptureGraphStats {
-        self.stats
+        let mut stats = self.stats;
+        let frontend = self.frontend.statistics();
+        stats.input_frames = frontend.input_frames;
+        stats.processing_eof_padding_frames = frontend.processing_eof_padding_frames;
+        stats.processing_execution_ns = frontend.processing_execution_ns;
+        stats
     }
     /// Admits a bounded arbitrary native block, preserving callback remainders in FIFOs.
     pub fn push_native(&mut self, pcm: &[f32]) -> AudioResult<Vec<CapturePacket>> {
         if self.state != GraphState::Running {
             return Err(AudioError::Cancelled);
         }
-        let frames = self.config.input_format.frames_in(pcm.len())?.get();
-        if frames * 1000
-            > u64::from(self.config.input_format.sample_rate_hz())
-                * u64::from(self.config.max_ingress_ms)
-        {
-            return Err(AudioError::ResourceExhausted(
-                "capture ingress work budget exceeded".into(),
-            ));
-        }
-        let mapped_format = AudioFormat::new(
-            self.config.input_format.sample_rate_hz(),
-            self.encoder.format().layout(),
-        )?;
-        let mapped = crate::channel::map_channels(self.config.input_format, mapped_format, pcm)?;
-        self.stats.input_frames += frames;
-        // Split a validated call into bounded filter jobs; this is not packet padding.
-        let chunk = usize::try_from(u64::from(mapped_format.sample_rate_hz()) / 10)
-            .map_err(|_| AudioError::ResourceExhausted("capture chunk overflow".into()))?
-            * usize::from(mapped_format.channels());
-        let result = (|| {
-            let mut packets = Vec::new();
-            for input in mapped.chunks(chunk) {
-                let converted = self.resampler.push(input)?;
-                packets.extend(self.accept_converted(&converted)?);
+        let converted = match self.frontend.push_native(pcm) {
+            Ok(pcm) => pcm,
+            Err(error) => {
+                // Validation rejects untouched input; only an advanced/failed
+                // frontend is terminal. Preserve the production recovery contract.
+                if self.frontend.state() == GraphState::Stopped {
+                    self.abort();
+                }
+                return Err(error);
             }
-            Ok(packets)
-        })();
+        };
+        let result = self.accept_converted(&converted);
         // A failing backend may have advanced history. Never resume a half-consumed graph.
         if result.is_err() {
             self.abort();
@@ -198,27 +185,7 @@ impl CaptureGraph {
         result
     }
     fn accept_converted(&mut self, pcm: &[f32]) -> AudioResult<Vec<CapturePacket>> {
-        if let Some(processor) = &mut self.processor {
-            self.processing_fifo.extend(pcm.iter().copied());
-            while self.processing_fifo.len() >= self.quantum_samples {
-                let mut quantum = self
-                    .processing_fifo
-                    .drain(..self.quantum_samples)
-                    .collect::<Vec<_>>();
-                let started = Instant::now();
-                processor.process_capture(&mut quantum)?;
-                let elapsed = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-                self.stats.processing_execution_ns = Some(
-                    self.stats
-                        .processing_execution_ns
-                        .unwrap_or(0)
-                        .saturating_add(elapsed),
-                );
-                self.packet_fifo.extend(quantum);
-            }
-        } else {
-            self.packet_fifo.extend(pcm.iter().copied());
-        }
+        self.packet_fifo.extend(pcm.iter().copied());
         let mut result = Vec::new();
         while self.packet_fifo.len() >= self.packet_samples {
             let pcm = self
@@ -253,13 +220,7 @@ impl CaptureGraph {
         if self.state != GraphState::Running {
             return Err(AudioError::Cancelled);
         }
-        let Some(processor) = &mut self.processor else {
-            return Err(AudioError::Unsupported(
-                "capture processing is bypassed".into(),
-            ));
-        };
-        processor.set_delay_ms(delay_ms)?;
-        processor.analyze_render(pcm)
+        self.frontend.analyze_render(pcm, delay_ms)
     }
     /// Drains known resampler/FIFO tails once, recording APM/codec EOF padding separately.
     /// Unknown processor latency remains unknown; this does not certify a backend's internal tail.
@@ -275,14 +236,8 @@ impl CaptureGraph {
     }
     fn finish_inner(&mut self) -> AudioResult<Vec<CapturePacket>> {
         self.state = GraphState::Draining;
-        let tail = self.resampler.finish()?;
+        let tail = self.frontend.finish()?;
         let mut result = self.accept_converted(&tail)?;
-        if !self.processing_fifo.is_empty() {
-            let missing = self.quantum_samples - self.processing_fifo.len();
-            self.stats.processing_eof_padding_frames +=
-                (missing / usize::from(self.encoder.format().channels())) as u64;
-            result.extend(self.accept_converted(&vec![0.0; missing])?);
-        }
         if !self.packet_fifo.is_empty() {
             let missing = self.packet_samples - self.packet_fifo.len();
             self.stats.packet_eof_padding_frames +=
@@ -295,7 +250,7 @@ impl CaptureGraph {
     }
     /// Immediately discards pending FIFO tails. Idempotent; no background tasks are detached.
     pub fn abort(&mut self) {
-        self.processing_fifo.clear();
+        self.frontend.abort();
         self.packet_fifo.clear();
         self.state = GraphState::Stopped;
     }

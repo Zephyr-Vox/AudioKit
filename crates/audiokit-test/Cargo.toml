@@ -1,0 +1,23 @@
+[package]
+name = "audiokit-test"
+description = "Headless AudioKit audio debugging application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["processing-sonora", "codec-opus"]
+processing-sonora = ["audiokit-testkit/processing-sonora"]
+codec-opus = ["audiokit-testkit/codec-opus"]
+
+[dependencies]
+audiokit-testkit = { path = "../audiokit-testkit" }
+serde_json.workspace = true
+ctrlc.workspace = true
+
+[dev-dependencies]
+hound.workspace = true
+
+[lints]
+workspace = true
