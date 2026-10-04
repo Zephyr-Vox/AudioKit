@@ -34,7 +34,9 @@ impl Material {
         let samples = target
             .checked_mul(usize::from(format.channels()))
             .ok_or_else(|| Error::Invalid("capture sample budget overflow".into()))?;
-        if samples > config.max_pcm_samples || samples as u64 * 4 + 128 > config.max_input_bytes {
+        if samples > config.pcm_sample_limit()
+            || samples as u64 * 4 + 128 > config.input_byte_limit()
+        {
             return Err(Error::Invalid(
                 "requested recording exceeds input resource budget".into(),
             ));
@@ -300,7 +302,7 @@ mod tests {
         assert!(!m.report.healthy());
         m.report.validate(&c, format, 4800).unwrap();
         assert_eq!(
-            crate::io::wav(&m.wav().unwrap(), c.max_pcm_samples)
+            crate::io::wav(&m.wav().unwrap(), c.pcm_sample_limit())
                 .unwrap()
                 .1,
             m.pcm

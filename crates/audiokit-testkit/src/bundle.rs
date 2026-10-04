@@ -211,7 +211,8 @@ fn load(root: &Path) -> Result<Bundle> {
         || config.retain_input && config.input_artifact() != input_artifact
         || manifest.complete != (diagnostics.status == "completed")
         || manifest.reproduction != config.reproduction(&diagnostics.graph_statistics)
-        || serde_json::to_value(&config)? != serde_json::to_value(&diagnostics.effective_config)?
+        || serde_json::to_value(config.resolved_resources())?
+            != serde_json::to_value(diagnostics.effective_config.resolved_resources())?
     {
         return Err(Error::Invalid(
             "inconsistent bundle identity, configuration or completion".into(),

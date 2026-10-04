@@ -62,6 +62,87 @@ fn bypass() -> RunConfig {
 }
 
 #[test]
+fn automatic_resources_grow_through_resampling_and_preserve_manual_limits() {
+    use audiokit_testkit::{MAX_INPUT_BYTES, MAX_PCM_SAMPLES, inspect, read_processed_wav};
+    let fixture = Fixture::new();
+    let input = fixture.input(8_000, 2, 1001);
+    let mut config = bypass();
+    assert_eq!(config.max_input_bytes, 0);
+    assert_eq!(config.max_pcm_samples, 0);
+    assert_eq!(config.input_byte_limit(), MAX_INPUT_BYTES);
+    assert_eq!(config.pcm_sample_limit(), MAX_PCM_SAMPLES);
+    config.retain_input = true;
+    let output = fixture.path("automatic");
+    let d = run(&config, &input, &output, &Cancellation::default(), |_| {}).unwrap();
+    let resources = &d.graph_statistics["resources"];
+    assert_eq!(resources["automatic_pcm"], true);
+    assert_eq!(resources["input_pcm_samples"], 2002);
+    assert!(resources["output_pcm_samples"].as_u64().unwrap() > 2002);
+    assert!(resources["output_capacity_samples"].as_u64().unwrap() < 16 * 1024 * 1024);
+    assert_eq!(d.requested_config.max_pcm_samples, 0);
+    assert_eq!(d.effective_config.max_pcm_samples, MAX_PCM_SAMPLES);
+    assert!(inspect(&output).is_ok());
+    let replayed = fixture.path("automatic-replay");
+    replay(&output, None, &replayed, &Cancellation::default(), |_| {}).unwrap();
+    assert_eq!(
+        read_processed_wav(&output).unwrap(),
+        read_processed_wav(&replayed).unwrap()
+    );
+
+    config.max_pcm_samples = 2002; // Fits the source, but not 8 -> 48 kHz output.
+    let error = run(
+        &config,
+        &input,
+        &fixture.path("manual"),
+        &Cancellation::default(),
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("output sample budget exhausted"));
+    let d = json(&fixture.path("manual/diagnostics.json"));
+    assert_eq!(d["graph_statistics"]["resources"]["automatic_pcm"], false);
+    assert!(
+        d["graph_statistics"]["resources"]["output_capacity_samples"]
+            .as_u64()
+            .unwrap()
+            <= 2002
+    );
+    assert!(analyze(&fixture.path("manual")).is_ok());
+}
+
+#[test]
+fn automatic_sweep_caps_cannot_bypass_aggregate_reservations() {
+    use audiokit_testkit::SweepMatrix;
+    let mut config = bypass();
+    config.scenario = Scenario::MixStress;
+    let matrix = SweepMatrix {
+        mix_sources: vec![1, 2, 3],
+        max_total_output_samples: 3001,
+        ..Default::default()
+    };
+    let cases = matrix.expand(&config).unwrap();
+    assert_eq!(cases.len(), 3);
+    assert!(cases.iter().all(|c| c.pcm_sample_limit() == 1000));
+    assert_eq!(config.max_pcm_samples, 0); // Source config remains immutable.
+    config.max_pcm_samples = 2000;
+    assert!(matrix.expand(&config).is_err());
+    config.max_pcm_samples = 0;
+    assert!(
+        SweepMatrix {
+            max_total_output_samples: 2,
+            ..matrix
+        }
+        .expand(&config)
+        .is_err()
+    );
+    config.max_pcm_samples = audiokit_testkit::MAX_PCM_SAMPLES + 1;
+    assert!(config.validate().is_err());
+    config.max_pcm_samples = 0;
+    config.max_input_bytes = audiokit_testkit::MAX_INPUT_BYTES + 1;
+    assert!(config.validate().is_err());
+}
+
+#[test]
 fn presets_and_exports_are_bounded_validated_and_never_overwrite() {
     use audiokit_testkit::{
         export_bundle, export_wav, inspect, read_config, read_processed_wav, read_wav, write_config,
@@ -92,6 +173,7 @@ fn presets_and_exports_are_bounded_validated_and_never_overwrite() {
         let (export_format, export_pcm) = read_wav(&wav, 268_435_584, 67_108_864).unwrap();
         assert_eq!(format, export_format);
         assert_eq!(pcm, export_pcm);
+        assert_eq!(pcm, read_wav(&wav, 0, 0).unwrap().1);
         assert!(read_wav(&wav, 1, 1001).is_err());
         assert!(read_wav(&wav, 268_435_585, 1001).is_err());
         let cancelled = Cancellation::default();
@@ -728,7 +810,10 @@ fn fault_configuration_and_sweep_axes_reject_uncovered_or_unbounded_work() {
             max_total_output_samples: 1,
             ..Default::default()
         }
-        .expand(&config)
+        .expand(&RunConfig {
+            max_pcm_samples: 2,
+            ..config.clone()
+        })
         .is_err()
     );
     config.max_pcm_samples = usize::MAX;

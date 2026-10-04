@@ -25,12 +25,22 @@ externally supplied original hash-matching WAV or packet JSON to replay. Hardwar
 replay is not implemented. See `packet-replay.md` for the strict separate packet
 input schema, bounds and producer-declared completeness limits.
 
-`config.json` contains validated effective run controls and resource budgets, no
+`config.json` contains validated requested run controls and resource budgets, no
 local input filename. `diagnostics.json` retains requested/effective controls,
 plan, input hash, per-channel input/output frames, signal measurements, graph
 accounting, latency, checks, unavailable observations and optional error. Replay
 records `replay_origin` with original identity/status/source/build change; it does
 not reproduce a previous cancellation or physical callback schedule.
+
+Resource limits default to automatic mode (`max_input_bytes: 0`,
+`max_pcm_samples: 0`); nonzero values retain manual limits. Allocation follows
+actual file/header/output demand, with hard guards of 256 MiB input and 67108864
+scalar samples per input/output PCM buffer. `effective_config` resolves automatic
+zeros to those guards, including the independent 32 MiB packet JSON guard; these
+are ceilings, not full-cap allocations. `graph_statistics.resources` records the
+requested automatic modes, effective guards, actual byte/sample counts and output
+capacity. Older bundles without this extra accounting remain importable; effective
+resource controls are compared after resolving equivalent guard representations.
 
 Status is `completed`, `cancelled` or `failed`. Completion does not imply every
 check passed. A partial package can still have valid file hashes and a finalized

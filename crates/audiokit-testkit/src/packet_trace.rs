@@ -171,7 +171,7 @@ impl PacketTrace {
         let samples = self.render_ticks_ns.len() as u64
             * u64::from(config.receive.render.format.sample_rate_hz() / 100)
             * u64::from(config.receive.render.format.channels());
-        if samples > config.max_pcm_samples as u64 {
+        if samples > config.pcm_sample_limit() as u64 {
             return Err(Error::Invalid(
                 "recorded render demand exceeds output sample budget".into(),
             ));
@@ -194,7 +194,7 @@ impl PacketTrace {
     }
 }
 pub(crate) fn parse(raw: &[u8], config: &RunConfig) -> Result<PacketTrace> {
-    if raw.len() as u64 > crate::io::JSON_LIMIT.min(config.max_input_bytes) {
+    if raw.len() as u64 > config.input_byte_limit() {
         return Err(Error::Invalid(
             "packet recording exceeds JSON/input byte budget".into(),
         ));

@@ -174,7 +174,7 @@ fn execute() -> Result<(Value, i32), Error> {
                 None => None,
             };
             Ok((
-                json!({"schema_version":1,"valid":true,"effective_config":config,"plan":plan,"plan_reason":if plan.is_none() {Some("supply --input to resolve boundary formats")} else {None}}),
+                json!({"schema_version":1,"valid":true,"requested_config":config,"effective_config":config.resolved_resources(),"plan":plan,"plan_reason":if plan.is_none() {Some("supply --input to resolve boundary formats")} else {None}}),
                 0,
             ))
         }

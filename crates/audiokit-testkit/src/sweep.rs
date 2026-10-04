@@ -112,7 +112,18 @@ impl SweepMatrix {
                 "sum of source-frame caps exceeds sweep work budget".into(),
             ));
         }
-        if count as u64 * base.max_pcm_samples as u64 > self.max_total_output_samples {
+        // Automatic cases share the aggregate guard equally. Treating zero as
+        // no reservation would bypass sweep accounting; reserving the full hard
+        // guard per case would reject even tiny default sweeps unnecessarily.
+        let case_sample_limit = if base.max_pcm_samples == 0 {
+            base.pcm_sample_limit()
+                .min((self.max_total_output_samples / count as u64) as usize)
+        } else {
+            base.pcm_sample_limit()
+        };
+        if case_sample_limit == 0
+            || count as u64 * case_sample_limit as u64 > self.max_total_output_samples
+        {
             return Err(Error::Invalid(
                 "sum of per-case output caps exceeds sweep sample budget".into(),
             ));
@@ -137,7 +148,9 @@ impl SweepMatrix {
         } else {
             self.jitter_targets_ms.clone()
         };
-        let mut configs = vec![base.clone()];
+        let mut case_base = base.clone();
+        case_base.max_pcm_samples = case_sample_limit;
+        let mut configs = vec![case_base];
         let counts = if self.mix_sources.is_empty() {
             vec![base.mix_stress.sources]
         } else {
@@ -241,8 +254,8 @@ pub fn sweep(
 ) -> Result<SweepReport> {
     base.validate()?;
     let configs = matrix.expand(base)?;
-    let raw = io::bytes(input, base.max_input_bytes)?;
-    let (format, pcm) = io::wav(&raw, base.max_pcm_samples)?;
+    let raw = io::bytes(input, base.input_byte_limit())?;
+    let (format, pcm) = io::wav(&raw, configs[0].pcm_sample_limit())?;
     let frames = format.frames_in(pcm.len())?.get();
     crate::runner::validate_source_budget(base, format, pcm.len())?;
     if frames * 1000 > u64::from(format.sample_rate_hz()) * u64::from(matrix.max_input_duration_ms)
@@ -259,7 +272,7 @@ pub fn sweep(
         let plan = config.plan(format)?;
         crate::runner::validate_plan(config, &plan)?;
         reserved += 4 * io::JSON_LIMIT
-            + config.max_pcm_samples as u64 * 4
+            + config.pcm_sample_limit() as u64 * 4
             + 128
             + if config.retain_input {
                 raw.len() as u64

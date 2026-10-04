@@ -206,8 +206,18 @@ export component Workbench inherits Window {
                         title: @tr("Resources");
                         VerticalLayout {
                             padding: 16px; spacing: 12px;
-                            Field { label: @tr("Input byte budget"); value <=> root.controls.input-bytes; active: !root.busy; }
-                            Field { label: @tr("PCM sample budget"); value <=> root.controls.pcm-samples; active: !root.busy; }
+                            CheckBox {
+                                text: @tr("Automatic input budget"); enabled: !root.busy;
+                                checked: root.controls.input-bytes == "0";
+                                toggled => { root.controls.input-bytes = self.checked ? "0" : "67108864"; }
+                            }
+                            Field { label: @tr("Input byte budget"); value <=> root.controls.input-bytes; active: !root.busy && root.controls.input-bytes != "0"; }
+                            CheckBox {
+                                text: @tr("Automatic PCM budget"); enabled: !root.busy;
+                                checked: root.controls.pcm-samples == "0";
+                                toggled => { root.controls.pcm-samples = self.checked ? "0" : "16777216"; }
+                            }
+                            Field { label: @tr("PCM sample budget"); value <=> root.controls.pcm-samples; active: !root.busy && root.controls.pcm-samples != "0"; }
                             Rectangle { vertical-stretch: 1; }
                         }
                     }

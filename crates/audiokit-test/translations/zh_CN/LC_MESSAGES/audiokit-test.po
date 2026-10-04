@@ -424,5 +424,11 @@ msgstr "输入字节上限"
 msgid "PCM sample budget"
 msgstr "PCM 样本数量上限"
 
+msgid "Automatic input budget"
+msgstr "自动输入预算"
+
+msgid "Automatic PCM budget"
+msgstr "自动 PCM 预算"
+
 msgid "WAV sample budget exceeded: {} samples required, limit {} ({} s, {} Hz, {} channels)."
 msgstr "WAV 样本数量超限：需要 {} 个样本，当前上限 {}（时长 {} 秒，{} Hz，{} 声道）。"

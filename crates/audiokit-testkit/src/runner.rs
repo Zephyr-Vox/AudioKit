@@ -247,13 +247,26 @@ impl Work {
         }
     }
     fn append(&mut self, pcm: &[f32], config: &RunConfig) -> Result<()> {
-        if self
+        let limit = config.pcm_sample_limit();
+        let required = self
             .output
             .len()
             .checked_add(pcm.len())
-            .is_none_or(|n| n > config.max_pcm_samples)
-        {
-            return Err(Error::Execution("output sample budget exhausted".into()));
+            .ok_or_else(|| Error::Execution("output sample count overflow".into()))?;
+        if required > limit {
+            return Err(Error::Execution(format!(
+                "output sample budget exhausted: requires {required} interleaved samples, limit {limit}; output includes resampling, channel expansion and tails"
+            )));
+        }
+        if required > self.output.capacity() {
+            // Geometric growth avoids copying on every block, but must not reserve
+            // beyond the guard when a nearly-full Vec would otherwise double.
+            let capacity = required
+                .max(self.output.capacity().saturating_mul(2))
+                .min(limit);
+            self.output
+                .try_reserve_exact(capacity - self.output.len())
+                .map_err(|e| Error::Execution(format!("cannot allocate output PCM: {e}")))?;
         }
         self.output.extend_from_slice(pcm);
         Ok(())
@@ -1261,7 +1274,7 @@ fn run_inner(
         let trace = crate::packet_trace::parse(&raw, config)?;
         (trace.source.format, 0, InputMaterial::Packets(trace))
     } else {
-        let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
+        let (format, pcm) = io::wav(&raw, config.pcm_sample_limit())?;
         validate_source_budget(config, format, pcm.len())?;
         (
             format,
@@ -1436,6 +1449,17 @@ fn run_inner(
             });
         }
     }
+    let effective_config = config.resolved_resources();
+    work.stats["resources"] = json!({
+        "automatic_input": config.max_input_bytes == 0,
+        "automatic_pcm": config.max_pcm_samples == 0,
+        "input_byte_limit": config.input_byte_limit(),
+        "pcm_sample_limit": config.pcm_sample_limit(),
+        "input_bytes": raw.len(),
+        "input_pcm_samples": if config.scenario == Scenario::ReceiveSimulation { None } else { Some(input_frames * u64::from(format.channels())) },
+        "output_pcm_samples": work.output.len(),
+        "output_capacity_samples": work.output.capacity()
+    });
     let capture = &work.stats["capture"];
     if let Some(capture) = &material_capture {
         checks.push(Check { id: "material_capture_health".into(), passed: capture.healthy(), detail: "original microphone material: no gaps/cursor rejects/discontinuities/drops/xruns/error; not a realtime DSP or AEC acceptance".into() });
@@ -1454,7 +1478,7 @@ fn run_inner(
         }
         .into(),
         requested_config: config.clone(),
-        effective_config: config.clone(),
+        effective_config,
         plan: plan.clone(),
         input_sha256: io::hash(&raw),
         input_frames,

@@ -5,6 +5,11 @@ use audiokit::resample::ResamplerConfig;
 use audiokit::{AudioFormat, ChannelLayout, PacketDuration, StreamKind};
 use serde::{Deserialize, Serialize};
 
+/// Hard byte guard for buffered input, independent of automatic allocation.
+pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
+/// Hard scalar-sample guard for each decoded input or processed output buffer.
+pub const MAX_PCM_SAMPLES: usize = 64 * 1024 * 1024;
+
 /// Implemented offline scenarios, distinct from hardware/server E2E.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -97,9 +102,11 @@ pub struct RunConfig {
     pub mix_stress: crate::MixStressConfig,
     /// External packet-recording resource budgets; no devices or network are opened.
     pub receive_simulation: crate::ReceiveSimulationConfig,
-    /// Maximum input bytes, 1..=268435456; packet JSON also has a hard 32 MiB cap.
+    /// Zero (default) grows with input up to 256 MiB; nonzero sets a stricter cap.
+    /// Packet JSON independently retains its hard 32 MiB cap.
     pub max_input_bytes: u64,
-    /// Maximum interleaved decoded input or output samples, each 1..=67108864.
+    /// Zero (default) allocates by actual demand, up to 67108864 scalar samples
+    /// per input/output buffer. Nonzero sets a stricter cap; output includes tails.
     pub max_pcm_samples: usize,
     /// Maximum retained events, 1..=1000000; additional events are counted as lost.
     pub max_trace_events: usize,
@@ -126,8 +133,8 @@ impl Default for RunConfig {
             scheduler: Default::default(),
             mix_stress: Default::default(),
             receive_simulation: Default::default(),
-            max_input_bytes: 64 * 1024 * 1024,
-            max_pcm_samples: 16 * 1024 * 1024,
+            max_input_bytes: 0,
+            max_pcm_samples: 0,
             max_trace_events: 4096,
             max_trace_bytes: 8 * 1024 * 1024,
             retain_input: false,
@@ -172,6 +179,35 @@ pub struct ExecutionPlan {
     pub stages: Vec<Stage>,
 }
 impl RunConfig {
+    /// Resolves automatic input sizing to its hard guard, without allocating it.
+    pub const fn input_byte_limit(&self) -> u64 {
+        let limit = if self.max_input_bytes == 0 {
+            MAX_INPUT_BYTES
+        } else {
+            self.max_input_bytes
+        };
+        if matches!(self.scenario, Scenario::ReceiveSimulation) && limit > crate::io::JSON_LIMIT {
+            crate::io::JSON_LIMIT
+        } else {
+            limit
+        }
+    }
+    /// Resolves automatic PCM sizing to its hard guard, not a reservation size.
+    pub const fn pcm_sample_limit(&self) -> usize {
+        if self.max_pcm_samples == 0 {
+            MAX_PCM_SAMPLES
+        } else {
+            self.max_pcm_samples
+        }
+    }
+    /// Clones the controls with automatic zeros replaced by effective hard guards.
+    /// This describes limits only, never requests full-cap memory reservations.
+    pub fn resolved_resources(&self) -> Self {
+        let mut resolved = self.clone();
+        resolved.max_input_bytes = self.input_byte_limit();
+        resolved.max_pcm_samples = self.pcm_sample_limit();
+        resolved
+    }
     /// Shared scenario/profile defaults; desktop bypasses voice processing at 196 kbit/s.
     /// Unsupported stream kinds are rejected by validate, not silently converted.
     pub fn for_profile(scenario: Scenario, stream: StreamKind) -> Self {
@@ -228,8 +264,8 @@ impl RunConfig {
             ));
         }
         if self.schema_version != 1
-            || !(1..=268_435_456).contains(&self.max_input_bytes)
-            || !(1..=67_108_864).contains(&self.max_pcm_samples)
+            || self.max_input_bytes > MAX_INPUT_BYTES
+            || self.max_pcm_samples > MAX_PCM_SAMPLES
             || !(1..=1_000_000).contains(&self.max_trace_events)
             || !(1024..=8_388_608).contains(&self.max_trace_bytes)
             || !(1..=4000).contains(&self.max_payload_bytes)
@@ -464,13 +500,6 @@ impl RunConfig {
             "packets.json"
         } else {
             "input.wav"
-        }
-    }
-    pub(crate) fn input_byte_limit(&self) -> u64 {
-        if self.scenario == Scenario::ReceiveSimulation {
-            self.max_input_bytes.min(crate::io::JSON_LIMIT)
-        } else {
-            self.max_input_bytes
         }
     }
     pub(crate) fn reproduction(&self, stats: &serde_json::Value) -> &'static str {

@@ -32,7 +32,8 @@ pub use bundle::{
     read_processed_wav, replay,
 };
 pub use config::{
-    ExecutionPlan, NodeStatus, NoiseLevel, ProcessingConfig, RunConfig, Scenario, Stage,
+    ExecutionPlan, MAX_INPUT_BYTES, MAX_PCM_SAMPLES, NodeStatus, NoiseLevel, ProcessingConfig,
+    RunConfig, Scenario, Stage,
 };
 #[cfg(feature = "native-cpal")]
 pub use material_capture::record_microphone;
@@ -120,7 +121,7 @@ pub fn plan_file(config: &RunConfig, input: &std::path::Path) -> Result<Executio
         runner::validate_plan(config, &plan)?;
         return Ok(plan);
     }
-    let (format, pcm) = io::wav(&raw, config.max_pcm_samples)?;
+    let (format, pcm) = io::wav(&raw, config.pcm_sample_limit())?;
     runner::validate_source_budget(config, format, pcm.len())?;
     let plan = config.plan(format)?;
     runner::validate_plan(config, &plan)?;
@@ -141,12 +142,23 @@ pub fn write_config(path: &std::path::Path, config: &RunConfig) -> Result<()> {
 
 /// Loads bounded WAV PCM for an explicitly requested preview, without processing it.
 /// Sample limits match RunConfig; bytes allow an extra 128 bytes for output WAV headers.
+/// Zero selects automatic sizing under the corresponding hard guard.
 /// PCM16/24/32 and float32 are accepted.
 pub fn read_wav(
     path: &std::path::Path,
     max_bytes: u64,
     max_samples: usize,
 ) -> Result<(audiokit::AudioFormat, Vec<f32>)> {
+    let max_bytes = if max_bytes == 0 {
+        MAX_INPUT_BYTES + 128
+    } else {
+        max_bytes
+    };
+    let max_samples = if max_samples == 0 {
+        MAX_PCM_SAMPLES
+    } else {
+        max_samples
+    };
     if !(1..=268_435_584).contains(&max_bytes) || !(1..=67_108_864).contains(&max_samples) {
         return Err(Error::Invalid(
             "preview resource budget out of range".into(),

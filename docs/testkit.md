@@ -171,6 +171,10 @@ duration, sum of per-case output caps and conservative artifact reservation are
 bounded. Reservations include hard JSON caps, WAV caps and consented retained
 input per case; they can exceed actual output size substantially. They limit
 media/work/space, not OS execution wall time. Cases run serially, never in parallel.
+When the base uses automatic PCM sizing (`max_pcm_samples: 0`), expansion assigns
+each case an equal share of `max_total_output_samples`, capped by the per-buffer
+hard guard. These resolved nonzero per-case limits appear in each case's config;
+the base config retains zero. Explicit manual limits are never silently relaxed.
 
 Each `case-000` directory is an ordinary independently analyzable/replayable
 bundle. `base-config.json` and `matrix.json` record the base controls and axes,

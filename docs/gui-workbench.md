@@ -55,17 +55,26 @@ Sync from controls projects current widgets back into JSON (discarding unapplied
 JSON edits). Save preset saves the current controls, not unapplied JSON text.
 Parameter changes never mutate a running graph: Run owns an immutable snapshot.
 
-Resources exposes `max_input_bytes` and `max_pcm_samples` directly. The default
-sample cap is 16777216 TOTAL scalar samples across all channels, about 174.8 s of
-48 kHz stereo, not 16777216 frames. The default input cap is 67108864 bytes.
-For a longer music WAV, select the desired profile first, then explicitly increase
-these budgets (e.g. 268435456 bytes and 67108864 samples); the hard limits remain
-256 MiB of input and 67108864 input OR output samples, and graph tails count toward
-output. Budget errors identify required samples, duration/rate/channels and the
-configured limit. No input is silently truncated or downsampled to pass validation.
-The runner currently buffers raw input, decoded PCM and output, so peak memory can
-substantially exceed one PCM buffer. Larger limits are opt-in, not memory estimates.
-The same values can be edited in Advanced JSON; press Apply JSON before running.
+Resources defaults to automatic input and PCM budgets (`max_input_bytes: 0`,
+`max_pcm_samples: 0`). Input allocation follows file size and the WAV header's
+actual interleaved sample count; processed output grows with real demand, including
+resampling, channel expansion and graph tails. No full-cap buffer is reserved for
+a small file. Automatic sizing remains bounded by 256 MiB of input and 67108864
+TOTAL scalar samples per input/output PCM buffer (about 699 s at 48 kHz stereo).
+Packet JSON independently keeps its 32 MiB hard limit. No audio is truncated,
+downsampled or given a lower bitrate to fit a budget.
+
+Uncheck either automatic option to set a stricter numeric limit. Existing presets
+with nonzero limits retain their manual behavior; use the automatic toggles to
+convert them. Advanced JSON accepts zero for automatic sizing, and Save preset
+persists the mode. Diagnostics preserve zeros in `requested_config`, resolve guards
+in `effective_config`, and expose actual input/output sizes and output capacity in
+`graph_statistics.resources`. Serial sweeps divide their aggregate sample guard
+equally among automatic cases, retaining conservative work/disk accounting.
+
+The runner buffers raw input, decoded PCM and output; these are per-buffer limits,
+not a process RSS guarantee, and peak memory can substantially exceed one buffer.
+Larger files still need a future streaming reader/writer, not unbounded allocation.
 
 Validate resolves actual input formats and constructs the production graph without
 artifacts. Run creates a unique child of the selected output folder and never

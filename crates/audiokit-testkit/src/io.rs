@@ -19,6 +19,8 @@ pub(crate) fn bytes(path: &Path, max: u64) -> Result<Vec<u8>> {
         )));
     }
     let mut data = Vec::new();
+    data.try_reserve_exact(size as usize)
+        .map_err(|e| Error::Execution(format!("cannot allocate input bytes: {e}")))?;
     file.take(max + 1).read_to_end(&mut data)?;
     if data.len() as u64 > max {
         return Err(Error::Invalid("file grew beyond byte budget".into()));
@@ -64,7 +66,9 @@ pub(crate) fn wav(data: &[u8], max_samples: usize) -> Result<(AudioFormat, Vec<f
             channels: spec.channels,
         });
     }
-    let mut pcm = Vec::with_capacity(reader.len() as usize);
+    let mut pcm = Vec::new();
+    pcm.try_reserve_exact(reader.len() as usize)
+        .map_err(|e| Error::Execution(format!("cannot allocate decoded PCM: {e}")))?;
     match (spec.sample_format, spec.bits_per_sample) {
         (hound::SampleFormat::Float, 32) => {
             for sample in reader.samples::<f32>() {

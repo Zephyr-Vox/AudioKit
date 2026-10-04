@@ -103,7 +103,7 @@ impl MaterialCaptureReport {
             || self.timestamp_error_boundaries > self.captured_frames
             || self.first_device_timestamp_ns.is_some() != self.last_device_timestamp_ns.is_some()
             || frames == 0
-            || frames > config.max_pcm_samples as u64 / u64::from(format.channels())
+            || frames > config.pcm_sample_limit() as u64 / u64::from(format.channels())
             || ![
                 "duration_reached",
                 "finished_early",
