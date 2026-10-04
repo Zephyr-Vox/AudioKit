@@ -2,9 +2,9 @@
 use crate::workbench::Job;
 use audiokit_platform::cpal::{AudioDeviceInfo, list_devices};
 use audiokit_testkit::{
-    Cancellation, Diagnostics, Error, ExecutionPlan, Manifest, NodeStatus, ProgressEvent, Result,
-    RunConfig, analyze, export_bundle, export_wav, inspect, plan_file, read_config, run,
-    write_config,
+    Cancellation, Diagnostics, Error, ExecutionPlan, Manifest, MaterialCaptureOptions, NodeStatus,
+    ProgressEvent, ProgressUnit, Result, RunConfig, analyze, export_bundle, export_wav, inspect,
+    plan_file, read_config, record_microphone, run, write_config,
 };
 use slint::{ComponentHandle, ModelRc, VecModel};
 use std::{
@@ -24,6 +24,45 @@ mod forms;
 #[path = "gui_preview.rs"]
 mod preview;
 use ui::{StageRow, Workbench};
+
+fn status(ui: &Workbench, text: slint::SharedString) {
+    ui.set_status_prefix("".into());
+    ui.set_status_detail("".into());
+    ui.set_status(text);
+}
+fn detail_status(ui: &Workbench, prefix: &str, detail: String) {
+    status(ui, format!("{prefix}: {detail}").into());
+    ui.set_status_prefix(prefix.into());
+    ui.set_status_detail(detail.into());
+}
+fn language(ui: &Workbench, index: i32, devices: &[AudioDeviceInfo]) -> Result<()> {
+    let locale = match index {
+        0 => "zh_CN",
+        1 => "en",
+        _ => return Err(Error::Invalid("unknown UI language".into())),
+    };
+    slint::select_bundled_translation(locale).map_err(|e| Error::Capability(e.to_string()))?;
+    let default = ui
+        .global::<ui::Strings>()
+        .invoke_translate("System default".into());
+    let mut outputs = vec![default.clone()];
+    outputs.extend(
+        devices
+            .iter()
+            .filter(|d| d.output)
+            .map(|d| d.name.clone().into()),
+    );
+    let mut inputs = vec![default];
+    inputs.extend(
+        devices
+            .iter()
+            .filter(|d| d.input)
+            .map(|d| d.name.clone().into()),
+    );
+    ui.set_output_devices(ModelRc::new(VecModel::from(outputs)));
+    ui.set_input_devices(ModelRc::new(VecModel::from(inputs)));
+    Ok(())
+}
 
 enum Outcome {
     Config(Box<RunConfig>),
@@ -117,7 +156,7 @@ fn fresh(base: &Path, prefix: &str) -> PathBuf {
 }
 fn show_error(ui: &Workbench, error: &Error) {
     ui.set_failed(true);
-    ui.set_status(error.to_string().into());
+    detail_status(ui, "Operation failed", error.to_string());
 }
 fn show_plan(ui: &Workbench, plan: &ExecutionPlan, state: &str) {
     ui.set_coverage(format!("{state} / {}", plan.coverage).into());
@@ -148,11 +187,27 @@ fn metric(value: &serde_json::Value, key: &str) -> slint::SharedString {
 struct State {
     config: RunConfig,
     job: Option<Job<Outcome>>,
+    finish_capture: Option<Cancellation>,
     result: Option<PathBuf>,
     devices: Vec<AudioDeviceInfo>,
     closing: bool,
 }
 impl State {
+    fn clear_result(&mut self, ui: &Workbench) {
+        self.result = None;
+        ui.set_has_result(false);
+        ui.set_playable(false);
+        ui.set_coverage("Preparing / input not yet validated".into());
+        ui.set_stages(ModelRc::default());
+        ui.set_peak("--".into());
+        ui.set_clamps("--".into());
+        ui.set_gaps("--".into());
+        ui.set_cpu("--".into());
+        ui.set_checks("".into());
+        ui.set_evidence("".into());
+        ui.set_latency("".into());
+        ui.set_material_evidence("".into());
+    }
     fn apply(&mut self, ui: &Workbench, mut config: RunConfig, imported: bool) -> Result<()> {
         // A preset is not fresh authorization to share microphone/audio content.
         if imported {
@@ -181,13 +236,24 @@ impl State {
         ui.set_busy(true);
         ui.set_failed(false);
         ui.set_progress(0.0);
-        ui.set_status("Working".into());
+        status(ui, "Working".into());
         Ok(())
     }
     fn poll(&mut self, ui: &Workbench) {
         if let Some(job) = &self.job
             && let Some(p) = job.progress()
         {
+            if self.finish_capture.is_some() {
+                let recording = p.unit == ProgressUnit::NativeFrames
+                    && !self
+                        .finish_capture
+                        .as_ref()
+                        .is_some_and(Cancellation::is_cancelled);
+                ui.set_recording(recording);
+                if !recording {
+                    status(ui, "Working".into());
+                }
+            }
             ui.set_progress(if p.total_frames == 0 {
                 0.0
             } else {
@@ -196,6 +262,8 @@ impl State {
         }
         if let Some(result) = self.job.as_mut().and_then(Job::finish) {
             self.job = None;
+            self.finish_capture = None;
+            ui.set_recording(false);
             ui.set_busy(false);
             match result.and_then(|outcome| self.accept(ui, outcome)) {
                 Ok(()) => {}
@@ -211,25 +279,22 @@ impl State {
         match outcome {
             Outcome::Config(c) => {
                 self.apply(ui, *c, true)?;
-                ui.set_status("Preset loaded / source sharing off".into());
+                status(ui, "Preset loaded / source sharing off".into());
             }
             Outcome::Plan(p) => {
                 if self.result.is_none() {
                     show_plan(ui, &p, "Validated");
                 }
-                ui.set_status(
-                    format!("Input and production graph validated / {}", p.coverage).into(),
-                );
+                detail_status(ui, "Validated", p.coverage);
             }
-            Outcome::Saved(p) => ui.set_status(format!("Saved: {}", p.display()).into()),
-            Outcome::Message(message) => ui.set_status(message.into()),
+            Outcome::Saved(p) => detail_status(ui, "Saved", p.display().to_string()),
+            Outcome::Message(message) => detail_status(ui, "Preview completed", message),
             Outcome::Devices(devices) => {
-                let mut names = vec![slint::SharedString::from("System default")];
-                names.extend(devices.iter().map(|d| d.name.clone().into()));
-                ui.set_output_devices(ModelRc::new(VecModel::from(names)));
                 ui.set_output_device(0);
+                ui.set_input_device(0);
                 self.devices = devices;
-                ui.set_status("Playback device list refreshed".into());
+                language(ui, ui.get_language(), &self.devices)?;
+                status(ui, "Device list refreshed".into());
             }
             Outcome::Report(r) => {
                 let d = &r.diagnostics;
@@ -257,12 +322,23 @@ impl State {
                 ui.set_checks(r.checks.into());
                 ui.set_evidence(r.evidence.into());
                 ui.set_latency(r.latency.into());
-                ui.set_result_info(format!("{} / {} / {} Hz, {} ch / retained source: {} / trace drops: {} / physical E2E: unknown\n{}", d.run_id, d.status, d.plan.output_format.sample_rate_hz(), d.plan.output_format.channels(), r.manifest.input_audio_authorized, d.trace_events_dropped, r.path.display()).into());
+                ui.set_material_evidence(match &d.material_capture {
+                    Some(capture) => text_preview(&serde_json::to_value(capture)?)?.into(),
+                    None => "".into(),
+                });
+                ui.set_result_run(d.run_id.clone().into());
+                ui.set_result_state(d.status.clone().into());
+                ui.set_result_rate(d.plan.output_format.sample_rate_hz().to_string().into());
+                ui.set_result_channels(d.plan.output_format.channels().to_string().into());
+                ui.set_result_retained(r.manifest.input_audio_authorized);
+                ui.set_result_drops(d.trace_events_dropped.to_string().into());
+                ui.set_result_path(r.path.to_string_lossy().as_ref().into());
                 let pass = r.manifest.complete
                     && d.status == "completed"
                     && d.checks.iter().all(|c| c.passed);
                 ui.set_failed(!pass);
-                ui.set_status(
+                status(
+                    ui,
                     if pass {
                         "Completed / scoped checks passed"
                     } else {
@@ -282,7 +358,7 @@ impl State {
         self.closing = true;
         if let Some(job) = &self.job {
             job.cancel();
-            ui.set_status("Closing / waiting for worker finalization".into());
+            status(ui, "Closing / waiting for worker finalization".into());
             slint::CloseRequestResponse::KeepWindowShown
         } else {
             slint::CloseRequestResponse::HideWindow
@@ -296,6 +372,17 @@ fn path(value: slint::SharedString, label: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(value.as_str()))
 }
 fn bind(ui: &Workbench, state: Rc<RefCell<State>>) {
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_language_changed(move || {
+            if let Some(ui) = weak.upgrade()
+                && let Err(e) = language(&ui, ui.get_language(), &state.borrow().devices)
+            {
+                show_error(&ui, &e);
+            }
+        });
+    }
     macro_rules! action {
         ($name:ident, $body:expr) => {{
             let weak = ui.as_weak();
@@ -406,21 +493,80 @@ fn bind(ui: &Workbench, state: Rc<RefCell<State>>) {
                 Err(e) => Err(e),
             }
         })?;
-        s.result = None;
-        ui.set_has_result(false);
-        ui.set_playable(false);
-        ui.set_coverage("Preparing / input not yet validated".into());
-        ui.set_stages(ModelRc::default());
-        ui.set_peak("--".into());
-        ui.set_clamps("--".into());
-        ui.set_gaps("--".into());
-        ui.set_cpu("--".into());
-        ui.set_checks("".into());
-        ui.set_evidence("".into());
-        ui.set_latency("".into());
-        ui.set_result_info("".into());
+        s.clear_result(ui);
         Ok(())
     });
+    action!(on_record, |ui: &Workbench, s: &mut State| {
+        let c = forms::get(ui, &s.config)?;
+        let seconds: u32 = ui
+            .get_record_seconds()
+            .parse()
+            .map_err(|_| Error::Invalid("recording duration must be integer seconds".into()))?;
+        let options = MaterialCaptureOptions {
+            duration_ms: seconds
+                .checked_mul(1000)
+                .ok_or_else(|| Error::Invalid("recording duration overflow".into()))?,
+            ..MaterialCaptureOptions::default()
+        };
+        options.validate()?;
+        let index = ui.get_input_device();
+        let device = if index == 0 {
+            None
+        } else {
+            Some(
+                s.devices
+                    .iter()
+                    .filter(|d| d.input)
+                    .nth((index - 1) as usize)
+                    .ok_or_else(|| Error::Invalid("input device selection expired".into()))?
+                    .id
+                    .clone(),
+            )
+        };
+        let base = path(ui.get_output_base(), "output folder")?;
+        let output = fresh(&base, "microphone");
+        let finish = Cancellation::default();
+        let worker_finish = finish.clone();
+        s.apply(ui, c.clone(), false)?;
+        s.start(ui, move |stop, progress| {
+            if stop.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            std::fs::create_dir_all(&base)?;
+            match record_microphone(
+                &c,
+                options,
+                device.as_deref(),
+                &output,
+                &stop,
+                &worker_finish,
+                progress,
+            ) {
+                Ok(_) => report(output),
+                Err(e) if output.join("manifest.json").is_file() => report(output).map_err(|_| e),
+                Err(e) => Err(e),
+            }
+        })?;
+        s.finish_capture = Some(finish);
+        s.clear_result(ui);
+        ui.set_recording(true);
+        status(ui, "Recording microphone".into());
+        Ok(())
+    });
+    {
+        let weak = ui.as_weak();
+        let state = Rc::clone(&state);
+        ui.on_finish_recording(move || {
+            if let Some(ui) = weak.upgrade()
+                && ui.get_recording()
+                && let Some(finish) = &state.borrow().finish_capture
+            {
+                finish.cancel();
+                ui.set_recording(false);
+                status(&ui, "Working".into());
+            }
+        });
+    }
     {
         let weak = ui.as_weak();
         let state = Rc::clone(&state);
@@ -429,7 +575,7 @@ fn bind(ui: &Workbench, state: Rc<RefCell<State>>) {
                 && let Some(job) = &state.borrow().job
             {
                 job.cancel();
-                ui.set_status("Stopping / finalizing partial result".into());
+                status(&ui, "Stopping / finalizing partial result".into());
             }
         });
     }
@@ -473,11 +619,7 @@ fn bind(ui: &Workbench, state: Rc<RefCell<State>>) {
         ui,
         |_, _| {
             Ok(Outcome::Devices(
-                list_devices()
-                    .map_err(|e| Error::Execution(e.to_string()))?
-                    .into_iter()
-                    .filter(|d| d.output)
-                    .collect(),
+                list_devices().map_err(|e| Error::Execution(e.to_string()))?,
             ))
         }
     ));
@@ -492,7 +634,9 @@ fn bind(ui: &Workbench, state: Rc<RefCell<State>>) {
         } else {
             Some(
                 s.devices
-                    .get((index - 1) as usize)
+                    .iter()
+                    .filter(|d| d.output)
+                    .nth((index - 1) as usize)
                     .ok_or_else(|| Error::Invalid("playback device selection expired".into()))?
                     .id
                     .clone(),
@@ -521,19 +665,32 @@ pub(crate) fn launch(
     config: RunConfig,
     input: Option<PathBuf>,
     output: Option<PathBuf>,
+    locale: &str,
 ) -> Result<()> {
     config.validate()?;
+    let index = match locale {
+        "zh" | "zh-CN" | "zh_CN" => 0,
+        "en" => 1,
+        _ => return Err(Error::Invalid("language must be zh-CN or en".into())),
+    };
     let ui = Workbench::new().map_err(|e| Error::Capability(format!("GUI backend: {e}")))?;
+    ui.set_language(index);
+    language(&ui, index, &[])?;
     let state = Rc::new(RefCell::new(State {
         config: config.clone(),
         job: None,
+        finish_capture: None,
         result: None,
         devices: vec![],
         closing: false,
     }));
     state.borrow_mut().apply(&ui, config, true)?;
     ui.set_volume(0.2);
-    ui.set_output_devices(ModelRc::new(VecModel::from(vec!["System default".into()])));
+    ui.set_record_seconds(
+        (MaterialCaptureOptions::default().duration_ms / 1000)
+            .to_string()
+            .into(),
+    );
     if let Some(p) = input {
         ui.set_input_path(p.to_string_lossy().as_ref().into());
     }

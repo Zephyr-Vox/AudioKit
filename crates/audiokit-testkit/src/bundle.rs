@@ -173,6 +173,34 @@ fn load(root: &Path) -> Result<Bundle> {
     let diagnostics: Diagnostics = serde_json::from_slice(&snapshots["diagnostics.json"])?;
     let trace: Vec<TraceEvent> = serde_json::from_slice(&snapshots["trace.json"])?;
     let expected_plan = config.plan_parameters(diagnostics.plan.input_format)?;
+    let capture_checks = diagnostics
+        .checks
+        .iter()
+        .filter(|c| c.id == "material_capture_health")
+        .collect::<Vec<_>>();
+    if let Some(capture) = &diagnostics.material_capture {
+        if config.scenario == crate::Scenario::ReceiveSimulation
+            || diagnostics.replay_origin.is_some()
+        {
+            return Err(Error::Invalid(
+                "packet/replay input cannot assert native material capture".into(),
+            ));
+        }
+        capture.validate(
+            &config,
+            diagnostics.plan.input_format,
+            diagnostics.input_frames,
+        )?;
+        if capture_checks.len() != 1 || capture_checks[0].passed != capture.healthy() {
+            return Err(Error::Invalid(
+                "inconsistent material capture health check".into(),
+            ));
+        }
+    } else if !capture_checks.is_empty() {
+        return Err(Error::Invalid(
+            "material health check has no acquisition evidence".into(),
+        ));
+    }
     if config.schema_version != 1
         || diagnostics.schema_version != 1
         || diagnostics.run_id != manifest.run_id
@@ -330,6 +358,9 @@ fn evidence_flags(event: &TraceEvent) -> Vec<String> {
 /// Integrity-verified summary and a bounded timeline of observed flags.
 #[derive(Debug, Serialize)]
 pub struct Analysis {
+    /// Original acquisition counters, if present; no new device test is implied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material_capture: Option<crate::MaterialCaptureReport>,
     /// Response schema version.
     pub schema_version: u32,
     /// Integrity-checked original run.
@@ -366,6 +397,11 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
         .map(|c| c.id.clone())
         .collect::<Vec<_>>();
     let mut observations = vec![format!("observed: coverage is {}; hardware/server nodes are not covered", diagnostics.plan.coverage), "unknown: aggregate signal metrics and stage snapshots alone cannot prove an audible click or its root cause".into()];
+    if let Some(capture) = &diagnostics.material_capture {
+        observations.push(format!("observed: original native material stop={}, captured={}, inserted gaps={}, cursor rejects={}, port drops={}, xruns={}, error={}; processing followed capture, not realtime duplex",
+            capture.stop_reason, capture.captured_frames, capture.inserted_gap_frames, capture.rejected_cursor_frames, capture.port_dropped_frames, capture.xruns, capture.error_code));
+        observations.push("unknown: raw device timestamps and maximum host handoff age do not establish acoustic or physical E2E latency".into());
+    }
     if diagnostics.trace_events_dropped > 0 {
         observations.push(
             "observed: event budget exhausted; missing intervals cannot be inferred as healthy"
@@ -430,6 +466,7 @@ pub fn analyze(root: &Path) -> Result<Analysis> {
         });
     }
     Ok(Analysis {
+        material_capture: diagnostics.material_capture.clone(),
         schema_version: 1,
         run_id: diagnostics.run_id.clone(),
         integrity_verified: true,

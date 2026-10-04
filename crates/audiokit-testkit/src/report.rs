@@ -50,6 +50,10 @@ pub struct TraceEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Diagnostics {
+    /// Original microphone material provenance. None for file/replay runs.
+    /// This is not realtime DSP or acoustic E2E evidence; old bundles omit this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material_capture: Option<crate::MaterialCaptureReport>,
     /// Original run identity when this is a re-execution, otherwise None.
     pub replay_origin: Option<ReplayOrigin>,
     /// Report schema version, currently 1.

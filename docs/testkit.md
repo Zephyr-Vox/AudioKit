@@ -7,8 +7,10 @@ for parameter editing, listening and export; see `gui-workbench.md`.
 Deterministic virtual packet faults and serial
 parameter sweeps, correlated mix stress and independent virtual sample clocks are
 implemented. Single-source external Opus packet/schedule replay is available;
-see `packet-replay.md` for its separate input/material contract. Microphone/duplex
-scenarios, live host packet export and host/server E2E are **not implemented yet**.
+see `packet-replay.md` for its separate input/material contract. Explicit microphone
+material acquisition is available through optional `native-cpal`, then closes the
+device before invoking offline DSP; see `microphone-material.md`. Live microphone
+DSP/duplex, live host packet export and host/server E2E are **not implemented yet**.
 Native WAV audition is explicit and compiled, not hardware-accepted.
 There is no arbitrary node-connection editor or selectable endpoint range yet.
 
@@ -433,3 +435,18 @@ Windows validation passes 133 workspace unit/integration tests plus one doctest,
 and 33 headless unit/integration tests plus one doctest. Rust 1.92 compile-checks all
 workspace features/targets. Native audition, microphone/duplex and live server E2E
 are not hardware-accepted by these offline tests; A6 remains pending.
+
+The 2026-10-04 material/i18n slice adds explicitly authorized bounded microphone
+acquisition through optional CPAL, then stops the device before reusing offline
+DSP. Native material counters survive validated export; replay is waveform-identical
+without claiming new hardware health. The Slint UI bundles Simplified Chinese and
+English; switching language does not mutate a running config. Windows validation
+passes 136 all-feature workspace unit/integration tests, 33 backend-free headless
+tests, 36 headless CPAL-only tests and a doctest in each mode. Strict all-feature
+and backend-free Clippy, warning-as-error Rustdoc, fmt/diff checks and Rust 1.92
+all-feature/all-target compile checks pass. Chinese/English desktop/narrow/compact
+software screenshots are checked. No native devices are opened by this validation.
+Release GUI builds successfully; its actual CLI replay of the GUI-exported
+capture fixture matches input, config, plan, checks and output WAV bytes.
+See `microphone-material.md`; live microphone DSP, aligned AEC, platform hardware
+acceptance and the A6 host bridge remain pending.

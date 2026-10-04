@@ -10,9 +10,11 @@ license.workspace = true
 default = []
 processing-sonora = ["dep:audiokit-processing-sonora"]
 codec-opus = ["dep:audiokit-codec-opus"]
+native-cpal = ["dep:audiokit-platform"]
 
 [dependencies]
 audiokit = { path = "../audiokit" }
+audiokit-platform = { path = "../audiokit-platform", optional = true, features = ["native-cpal"] }
 audiokit-processing-sonora = { path = "../audiokit-processing-sonora", optional = true }
 audiokit-codec-opus = { path = "../audiokit-codec-opus", optional = true }
 serde.workspace = true

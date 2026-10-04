@@ -110,3 +110,11 @@ all-feature/headless Clippy and Rustdoc. Logs are
 slice; deterministic fault replay also matches. Local fault/sweep bundles in that
 directory record actual receiver late/duplicate/FEC/PLC outcomes, not just injected
 selections. This changes no production DSP/defaults and opens no native devices.
+
+On 2026-10-04 the optional test app adds bundled Chinese/English presentation and
+bounded native microphone material capture, followed by the same offline runner.
+The portable report remains readable without a native backend; retained audio can
+be replayed without treating the original acquisition check as a new device test.
+Default headless builds still exclude Slint/CPAL. The production client scheduler
+and SDK bridge are unchanged; this is an A5 debugging increment, not an A6 switch
+or live AEC/hardware acceptance. See `gui-workbench.md` and `microphone-material.md`.

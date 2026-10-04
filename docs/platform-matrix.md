@@ -12,11 +12,14 @@
 | Shared testkit/headless CLI | compiled, offline-tested | not repeated | not repeated |
 | Optional Slint offline workbench | compiled, software-window controls/layout/runner tests | not repeated | not repeated |
 | GUI native WAV audition | compiled; hardware not tested | not repeated | not repeated |
+| Microphone material capture + offline DSP | compiled, synthetic cursor/bundle tests; hardware not tested | not repeated | not repeated |
 
 The prior accepted Windows/macOS listening results describe the frozen client
 baseline, not hardware verification of a new AudioKit device engine. This milestone
 does not open a microphone or speaker during automated validation. GUI playback
-opens a device only after the user explicitly presses Play. Core and Sonora need no Opus C toolchain;
+opens a device only after the user explicitly presses Play; recording requires
+Record or the explicit CLI `record` command. Recording stops before offline DSP;
+it is not a live duplex/reference test. Core and Sonora need no Opus C toolchain;
 the optional codec backend uses libopus. CPAL raw clock and Windows QPC metadata
 are retained but are not interchangeable with host presentation timestamps.
 

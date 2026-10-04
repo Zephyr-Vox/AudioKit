@@ -13,6 +13,15 @@ From the AudioKit repository in PowerShell:
 cargo run -p audiokit-test --release --features gui -- --gui
 ```
 
+Simplified Chinese is the default. Select English in the language menu or pass
+`--language en`. Language changes affect presentation only, even while a job is
+running: config values, node IDs, diagnostic keys, bundle hashes and DSP state do
+not change. Slint bundles the gettext catalog from
+`crates/audiokit-test/translations/zh_CN/LC_MESSAGES/audiokit-test.po`; no external
+catalog installation is needed. Additional languages need their own catalog and
+an explicit locale/menu mapping. Engineering JSON/check details, native device
+names, paths and original backend error text retain their stable original form.
+
 Optional starting paths/preset do not start processing or open audio devices:
 
 ```powershell
@@ -23,8 +32,13 @@ Choose Capture PCM, Opus roundtrip, Multi-source render or Packet replay, then
 Voice/mono or Desktop/stereo. These select legal production subchains, not
 arbitrary edges or a second DSP implementation. WAV accepts PCM16/24/32 and
 float32 mono/stereo; packet replay uses the existing version-1 packet recording.
-Microphone input, aligned AEC reference, live server E2E and sweep UI are not
-implemented in this slice. AEC is explicitly unavailable for these file scenarios.
+Record explicitly opens the chosen microphone for 1..=60 integer seconds (default
+10), closes it, then runs the selected production subchain. Finish recording
+processes earlier material; Cancel cancels capture AND offline processing. The
+refresh icon discovers input/output devices without selecting a new non-default
+device. No device is opened at launch. Packet replay cannot take microphone PCM.
+See `microphone-material.md` for native counters, consent and replay boundaries.
+Aligned AEC reference, live monitoring/server E2E and sweep UI remain unimplemented.
 
 ## Parameters and Results
 
@@ -48,7 +62,7 @@ partial status, unknown observations and trace drops remain visible. Metrics and
 coverage are always from the last recorded result, not newly edited controls;
 a failed validation does not destroy it. A new run clears stale result controls.
 
-Checks, latency, bounded evidence and stage coverage are shown separately.
+Checks, latency, bounded evidence, material capture and stage coverage are separate.
 Unsupported counters say Not covered, not zero. Latency preserves unknown physical
 E2E and domain/method information; nested execution regions are not additive.
 The view omits histogram bins and bounds JSON display text to 64 KiB, while exports
@@ -83,7 +97,7 @@ Use the same binary's CLI to inspect or reproduce an exported bundle:
 Play is the only action that opens playback. It revalidates and decodes the exact
 hash-checked output bytes, maps channels/resamples with `CapturePcmGraph`, and
 feeds the selected CPAL port at its actual negotiated format. System default is
-available without discovery; Refresh explicitly lists output devices. Preview
+available without discovery; Refresh explicitly lists input/output devices. Preview
 volume defaults to 0.2. Preview-only scaling/clamps and startup silence never
 change the saved WAV or recorded pipeline latency. Physical presentation tail is
 unknown. Native audition is compiled, but not hardware-accepted by offline tests.
@@ -110,6 +124,10 @@ Headless CLI integration independently exercises the same runner and bundle form
 An actual CLI rerun of the GUI-exported capture fixture also matches input, config,
 plan, checks and output WAV bytes; CLIClient compile-checks with Rust 1.92.
 Screenshots at 1120x900, 720x900 and 720x700 cover parameters and scrolled results;
+Chinese and English switching is tested against the same immutable run snapshot.
+Synthetic native cursor gaps preserve missing frames, and material bundles retain
+validated provenance through export; replay produces identical DSP output but does
+not assert a new successful hardware capture.
 no microphone, speaker or network is opened by these tests. Run:
 
 ```powershell

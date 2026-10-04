@@ -70,18 +70,38 @@ fn command_inventory_is_machine_readable_and_honest_about_gui_devices() {
     assert!(output.status.success());
     assert_eq!(value(&output)["scenarios"].as_array().unwrap().len(), 4);
     assert_eq!(value(&output)["capabilities"]["gui"], cfg!(feature = "gui"));
-    assert_eq!(value(&output)["capabilities"]["devices"], false);
+    assert_eq!(
+        value(&output)["capabilities"]["devices"],
+        cfg!(feature = "native-cpal")
+    );
     assert_eq!(value(&output)["capabilities"]["sweep"], true);
-    for cmd in ["devices"].into_iter().chain(if cfg!(feature = "gui") {
-        None
-    } else {
-        Some("--gui")
-    }) {
+    for cmd in ["devices", "record", "--gui"]
+        .into_iter()
+        .filter(|cmd| match *cmd {
+            "--gui" => !cfg!(feature = "gui"),
+            _ => !cfg!(feature = "native-cpal"),
+        })
+    {
         let output = execute(&[cmd]);
         assert_eq!(output.status.code(), Some(3));
         assert_eq!(value(&output)["exit_code"], 3);
     }
     assert_eq!(execute(&["--gui", "--unknown"]).status.code(), Some(2));
+    assert_eq!(execute(&["devices", "--unknown"]).status.code(), Some(2));
+    if cfg!(feature = "gui") {
+        assert_eq!(
+            execute(&["--gui", "--language", "invalid"]).status.code(),
+            Some(2)
+        );
+    }
+    if cfg!(feature = "native-cpal") {
+        assert_eq!(
+            execute(&["record", "--duration-ms", "0", "--out-dir", "never-created"])
+                .status
+                .code(),
+            Some(2)
+        );
+    }
 }
 
 #[test]

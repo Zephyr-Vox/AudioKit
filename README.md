@@ -90,10 +90,12 @@ See `docs/source-dsp-diagnosis.md` for the measured 32/64-source limiter bottlen
 mono/stereo controls and the limits of the CPU attribution.
 See `docs/limiter-cache-optimization.md` for the behavior-preserving target cache,
 bitwise reference coverage and before/after worker CPU results.
-The optional Slint workbench now supports offline scenarios, parameter editing,
-diagnostic/WAV export and explicitly requested native WAV audition. See
-`docs/gui-workbench.md`. Microphone/duplex scenarios and the server host bridge
-are still pending; audition does not turn an offline bundle into hardware E2E.
+The optional Slint workbench supports offline scenarios, parameter editing,
+diagnostic/WAV export, explicit native WAV audition and bounded microphone
+material capture. Simplified Chinese is the default; English is selectable live.
+See `docs/gui-workbench.md` and `docs/microphone-material.md`. Microphone material
+is processed AFTER capture stops, not monitored live. Duplex/AEC and the server
+host bridge remain pending; this is not full hardware E2E.
 The CLI delegates shared DSP/Opus/resampling, but still uses its legacy device and
 receive scheduler until A6. No new microphone/speaker or macOS/Linux verification
 is implied by the deterministic tests in this workspace.

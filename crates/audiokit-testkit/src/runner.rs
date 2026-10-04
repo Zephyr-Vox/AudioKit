@@ -40,9 +40,11 @@ pub struct ProgressEvent {
     pub unit: ProgressUnit,
 }
 /// Work-count domain for progress; separate from signal/sample clock domains.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProgressUnit {
+    /// Native per-channel microphone frames acquired, before offline DSP starts.
+    NativeFrames,
     /// Native per-channel input PCM frames.
     InputFrames,
     /// Supplied packet records, including records with unavailable payloads.
@@ -1229,8 +1231,30 @@ pub(crate) fn run_bytes(
     raw: Vec<u8>,
     output_dir: &Path,
     stop: &Cancellation,
+    progress: impl FnMut(ProgressEvent),
+    replay_origin: Option<ReplayOrigin>,
+) -> Result<Diagnostics> {
+    run_inner(config, raw, output_dir, stop, progress, replay_origin, None)
+}
+#[cfg(feature = "native-cpal")]
+pub(crate) fn run_material(
+    config: &RunConfig,
+    raw: Vec<u8>,
+    output_dir: &Path,
+    stop: &Cancellation,
+    progress: impl FnMut(ProgressEvent),
+    material: Option<crate::MaterialCaptureReport>,
+) -> Result<Diagnostics> {
+    run_inner(config, raw, output_dir, stop, progress, None, material)
+}
+fn run_inner(
+    config: &RunConfig,
+    raw: Vec<u8>,
+    output_dir: &Path,
+    stop: &Cancellation,
     mut progress: impl FnMut(ProgressEvent),
     replay_origin: Option<ReplayOrigin>,
+    material_capture: Option<crate::MaterialCaptureReport>,
 ) -> Result<Diagnostics> {
     config.validate()?;
     let (format, input_frames, material) = if config.scenario == Scenario::ReceiveSimulation {
@@ -1246,6 +1270,9 @@ pub(crate) fn run_bytes(
         )
     };
     let plan = config.plan(format)?;
+    if let Some(capture) = &material_capture {
+        capture.validate(config, format, input_frames)?;
+    }
     let source = match &material {
         InputMaterial::Packets(trace) => Some(trace.source.registration()?),
         InputMaterial::Pcm(_) => None,
@@ -1410,7 +1437,11 @@ pub(crate) fn run_bytes(
         }
     }
     let capture = &work.stats["capture"];
+    if let Some(capture) = &material_capture {
+        checks.push(Check { id: "material_capture_health".into(), passed: capture.healthy(), detail: "original microphone material: no gaps/cursor rejects/discontinuities/drops/xruns/error; not a realtime DSP or AEC acceptance".into() });
+    }
     let diagnostics = Diagnostics {
+        material_capture,
         replay_origin,
         schema_version: 1,
         run_id: run_id.clone(),
@@ -1535,6 +1566,9 @@ pub(crate) fn compiled_backends() -> Vec<String> {
     }
     if cfg!(feature = "processing-sonora") {
         backends.push("processing-sonora".into());
+    }
+    if cfg!(feature = "native-cpal") {
+        backends.push("native-cpal".into());
     }
     backends
 }

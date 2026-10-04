@@ -18,6 +18,7 @@
 mod bundle;
 mod config;
 mod io;
+mod material_capture;
 mod packet_trace;
 mod report;
 mod runner;
@@ -33,6 +34,9 @@ pub use bundle::{
 pub use config::{
     ExecutionPlan, NodeStatus, NoiseLevel, ProcessingConfig, RunConfig, Scenario, Stage,
 };
+#[cfg(feature = "native-cpal")]
+pub use material_capture::record_microphone;
+pub use material_capture::{MaterialCaptureOptions, MaterialCaptureReport};
 pub use packet_trace::{PacketSource, PacketTrace, ReceiveSimulationConfig, RecordedPacket};
 pub use report::{Artifact, Check, Diagnostics, Manifest, ReplayOrigin, TraceEvent};
 pub use runner::{Cancellation, ProgressEvent, ProgressUnit, run};
@@ -74,7 +78,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Compiled repository revision, or unavailable outside an AudioKit Git checkout.
 pub const BUILD_REVISION: &str = env!("AUDIOKIT_REVISION");
-/// Content fingerprint of workspace/package Rust, TOML, Slint, SVG and available lockfile.
+/// Content fingerprint of Rust, TOML, Slint, SVG, PO catalogs and available lockfile.
 pub const BUILD_SOURCE_DIGEST: &str = env!("AUDIOKIT_SOURCE_DIGEST");
 
 impl Error {

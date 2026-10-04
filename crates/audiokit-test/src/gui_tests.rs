@@ -47,6 +47,7 @@ fn workbench_forms_worker_exports_and_software_layout() {
     let state = Rc::new(RefCell::new(State {
         config: config.clone(),
         job: None,
+        finish_capture: None,
         result: None,
         devices: vec![],
         closing: false,
@@ -54,7 +55,9 @@ fn workbench_forms_worker_exports_and_software_layout() {
     bind(&ui, Rc::clone(&state));
     state.borrow_mut().apply(&ui, config, false).unwrap();
     ui.set_volume(0.2);
-    ui.set_output_devices(ModelRc::new(VecModel::from(vec!["System default".into()])));
+    ui.set_language(1);
+    ui.invoke_language_changed();
+    ui.set_record_seconds("10".into());
     ui.show().unwrap();
     let root = fresh(
         &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/validation/gui"),
@@ -120,6 +123,18 @@ fn workbench_forms_worker_exports_and_software_layout() {
         serde_json::to_value(&state.borrow().config).unwrap(),
         snapshot
     );
+    ui.set_language(0);
+    ui.invoke_language_changed();
+    assert_eq!(
+        ui.global::<ui::Strings>()
+            .invoke_translate("Working".into())
+            .as_str(),
+        "处理中"
+    );
+    assert_eq!(
+        serde_json::to_value(&state.borrow().config).unwrap(),
+        snapshot
+    );
     wait(&ui, &state);
     assert!(ui.get_has_result());
     assert!(ui.get_playable());
@@ -151,9 +166,9 @@ fn workbench_forms_worker_exports_and_software_layout() {
         std::fs::read(bundle.join("processed.wav")).unwrap()
     );
     for (name, w, h) in [
-        ("desktop.png", 1120, 900),
-        ("narrow.png", 720, 900),
-        ("compact.png", 720, 700),
+        ("zh-desktop.png", 1120, 900),
+        ("zh-narrow.png", 720, 900),
+        ("zh-compact.png", 720, 700),
     ] {
         screenshot(&ui, &root.join(name), w, h);
     }
@@ -162,6 +177,16 @@ fn workbench_forms_worker_exports_and_software_layout() {
     ui.set_result_index(2);
     screenshot(&ui, &root.join("narrow-latency.png"), 720, 900);
     ui.set_scroll_position(0.0);
+    ui.set_language(1);
+    ui.invoke_language_changed();
+    assert_eq!(
+        ui.global::<ui::Strings>()
+            .invoke_translate("Working".into())
+            .as_str(),
+        "Working"
+    );
+    screenshot(&ui, &root.join("en-desktop.png"), 1120, 900);
+    screenshot(&ui, &root.join("en-compact.png"), 720, 700);
     for (panel, name) in [
         (2, "render.png"),
         (3, "protection.png"),
@@ -180,6 +205,16 @@ fn workbench_forms_worker_exports_and_software_layout() {
     assert!(ui.get_failed());
     assert!(state.borrow().job.is_none());
     for scenario in 0..3 {
+        // Invalid recording settings fail before native discovery/open.
+        state
+            .borrow_mut()
+            .apply(&ui, forms::defaults(scenario, 0).unwrap(), false)
+            .unwrap();
+        ui.set_record_seconds("0".into());
+        ui.invoke_record();
+        assert!(ui.get_failed());
+        assert!(state.borrow().job.is_none());
+        ui.set_record_seconds("10".into());
         for profile in 0..2 {
             let mut c = forms::defaults(scenario, profile).unwrap();
             c.processing.enabled = profile == 0 && scenario < 2;
@@ -251,6 +286,35 @@ fn workbench_forms_worker_exports_and_software_layout() {
     assert!(!text.contains("bins"));
     assert!(text.contains("null"));
     assert!(value.get("bins").is_some());
+
+    // Finish requests acquisition stop without cancelling the later DSP phase.
+    let finish = Cancellation::default();
+    let worker_finish = finish.clone();
+    state
+        .borrow_mut()
+        .start(&ui, move |stop, mut progress| {
+            progress(ProgressEvent {
+                input_frames: 1,
+                total_frames: 10,
+                unit: ProgressUnit::NativeFrames,
+            });
+            while !worker_finish.is_cancelled() {
+                assert!(!stop.is_cancelled());
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(!stop.is_cancelled());
+            Ok(Outcome::Saved(PathBuf::from("synthetic-finish")))
+        })
+        .unwrap();
+    state.borrow_mut().finish_capture = Some(finish.clone());
+    ui.set_recording(true);
+    ui.invoke_finish_recording();
+    state.borrow_mut().poll(&ui);
+    assert!(!ui.get_recording());
+    assert!(finish.is_cancelled());
+    wait(&ui, &state);
+    assert!(state.borrow().finish_capture.is_none());
+    assert!(!ui.get_failed());
 
     let finalized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = finalized.clone();

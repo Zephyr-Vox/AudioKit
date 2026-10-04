@@ -1,0 +1,97 @@
+//! Display translations only. Diagnostic IDs and JSON remain stable.
+export global Strings {
+    public pure function translate(value: string) -> string {
+        if value == "channel_map" { return @tr("Channel mapping"); }
+        if value == "packet_input" { return @tr("Packet replay"); }
+        if value == "source_resample" { return @tr("Render resampling"); }
+        if value == "activity_mix" { return @tr("Mix"); }
+        if value == "source_clock_correction" { return @tr("Clock correction"); }
+        if value == "virtual_output_queue" { return @tr("Virtual output queue"); }
+        if value == "completed" { return @tr("Completed"); }
+        if value == "cancelled" { return @tr("Cancelled"); }
+        if value == "failed" { return @tr("Failed"); }
+        if value == "capture-subchain" { return @tr("Capture subchain"); }
+        if value == "virtual-roundtrip" { return @tr("Opus roundtrip"); }
+        if value == "render-stress" { return @tr("Multi-source render"); }
+        if value == "receiver-replay" { return @tr("Packet replay"); }
+        if value == "Device list refreshed" { return @tr("Device list refreshed"); }
+        if value == "capture_resample" { return @tr("Capture resampling"); }
+        if value == "voice_apm" { return @tr("Voice APM"); }
+        if value == "packetizer" { return @tr("Packetization"); }
+        if value == "opus_encode" { return @tr("Opus encoding"); }
+        if value == "virtual_transport" { return @tr("Virtual transport"); }
+        if value == "encoded_jitter" { return @tr("Encoded jitter"); }
+        if value == "opus_decode" { return @tr("Opus decoding"); }
+        if value == "source_gain" { return @tr("Source gain"); }
+        if value == "source_limiter" { return @tr("Source limiter"); }
+        if value == "mix" { return @tr("Mix"); }
+        if value == "master_limiter" { return @tr("Master limiter"); }
+        if value == "render_resample" { return @tr("Render resampling"); }
+        if value == "clock_correction" { return @tr("Clock correction"); }
+        if value == "capture_device" { return @tr("Capture device"); }
+        if value == "output_device" { return @tr("Output device"); }
+        if value == "aec_reference" { return @tr("AEC reference"); }
+        if value == "server_transport" { return @tr("Server transport"); }
+        if value == "Not covered" { return @tr("Not covered"); }
+        if value == "Unknown" { return @tr("Unknown"); }
+        if value == "Applied" { return @tr("Applied"); }
+        if value == "Bypassed" { return @tr("Bypassed"); }
+        if value == "Working" { return @tr("Working"); }
+        if value == "Preset loaded / source sharing off" { return @tr("Preset loaded / source sharing off"); }
+        if value == "Playback device list refreshed" { return @tr("Playback device list refreshed"); }
+        if value == "Completed / scoped checks passed" { return @tr("Completed / scoped checks passed"); }
+        if value == "Partial or failed result / inspect checks" { return @tr("Partial or failed result / inspect checks"); }
+        if value == "Closing / waiting for worker finalization" { return @tr("Closing / waiting for worker finalization"); }
+        if value == "Stopping / finalizing partial result" { return @tr("Stopping / finalizing partial result"); }
+        if value == "Planned / input not validated" { return @tr("Planned / input not validated"); }
+        if value == "Preparing / input not yet validated" { return @tr("Preparing / input not yet validated"); }
+        if value == "System default" { return @tr("System default"); }
+        if value == "Saved" { return @tr("Saved"); }
+        if value == "Validated" { return @tr("Validated"); }
+        if value == "Operation failed" { return @tr("Operation failed"); }
+        if value == "Preview completed" { return @tr("Preview completed"); }
+        if value == "Recorded / capture-subchain" { return @tr("Recorded / capture-subchain"); }
+        if value == "Recorded / virtual-roundtrip" { return @tr("Recorded / virtual-roundtrip"); }
+        if value == "Recorded / render-stress" { return @tr("Recorded / render-stress"); }
+        if value == "Recorded / receiver-replay" { return @tr("Recorded / receiver-replay"); }
+        if value == "Validated / capture-subchain" { return @tr("Validated / capture-subchain"); }
+        if value == "Validated / virtual-roundtrip" { return @tr("Validated / virtual-roundtrip"); }
+        if value == "Validated / render-stress" { return @tr("Validated / render-stress"); }
+        if value == "Validated / receiver-replay" { return @tr("Validated / receiver-replay"); }
+        if value == "Capture material" { return @tr("Capture material"); }
+        if value == "Recording microphone" { return @tr("Recording microphone"); }
+        if value == "Finish recording" { return @tr("Finish recording"); }
+        if value == "Record" { return @tr("Record"); }
+        if value == "Input device" { return @tr("Input device"); }
+        if value == "Recording duration (s)" { return @tr("Recording duration (s)"); }
+        if value == "Microphone material / offline processing" { return @tr("Microphone material / offline processing"); }
+        if value == "Material capture" { return @tr("Material capture"); }
+        if value == "Capture subchain" { return @tr("Capture subchain"); }
+        if value == "Virtual transport" { return @tr("Virtual transport"); }
+        if value == "Channel mapping" { return @tr("Channel mapping"); }
+        if value == "Capture resampling" { return @tr("Capture resampling"); }
+        if value == "Voice APM" { return @tr("Voice APM"); }
+        if value == "Packetization" { return @tr("Packetization"); }
+        if value == "Opus encoding" { return @tr("Opus encoding"); }
+        if value == "Encoded jitter" { return @tr("Encoded jitter"); }
+        if value == "Opus decoding" { return @tr("Opus decoding"); }
+        if value == "Source gain" { return @tr("Source gain"); }
+        if value == "Source limiter" { return @tr("Source limiter"); }
+        if value == "Mix" { return @tr("Mix"); }
+        if value == "Master limiter" { return @tr("Master limiter"); }
+        if value == "Render resampling" { return @tr("Render resampling"); }
+        if value == "Clock correction" { return @tr("Clock correction"); }
+        if value == "Capture device" { return @tr("Capture device"); }
+        if value == "Output device" { return @tr("Output device"); }
+        if value == "AEC reference" { return @tr("AEC reference"); }
+        if value == "Server transport" { return @tr("Server transport"); }
+        if value == "Yes" { return @tr("Yes"); }
+        if value == "No" { return @tr("No"); }
+        if value == "Ready" { return @tr("Ready"); }
+        if value == "Offline" { return @tr("Offline"); }
+        return value;
+    }
+    public pure function summary(run: string, state: string, rate: string, channels: string, retained: bool, drops: string, path: string) -> string {
+        return @tr("{} / {} / {} Hz, {} ch / retained source: {} / trace drops: {} / physical E2E: unknown", run, translate(state), rate, channels, retained ? @tr("Yes") : @tr("No"), drops) + "\n" + path;
+    }
+}

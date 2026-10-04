@@ -10,7 +10,8 @@ license.workspace = true
 default = ["processing-sonora", "codec-opus"]
 processing-sonora = ["audiokit-testkit/processing-sonora"]
 codec-opus = ["audiokit-testkit/codec-opus"]
-gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:image", "dep:audiokit-platform"]
+native-cpal = ["audiokit-testkit/native-cpal", "dep:audiokit-platform"]
+gui = ["dep:slint", "dep:slint-build", "dep:rfd", "dep:image", "native-cpal"]
 
 [dependencies]
 audiokit-testkit = { path = "../audiokit-testkit" }
