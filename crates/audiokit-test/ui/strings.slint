@@ -94,4 +94,7 @@ export global Strings {
     public pure function summary(run: string, state: string, rate: string, channels: string, retained: bool, drops: string, path: string) -> string {
         return @tr("{} / {} / {} Hz, {} ch / retained source: {} / trace drops: {} / physical E2E: unknown", run, translate(state), rate, channels, retained ? @tr("Yes") : @tr("No"), drops) + "\n" + path;
     }
+    public pure function sample-budget(required: string, limit: string, seconds: string, rate: string, channels: string) -> string {
+        return @tr("WAV sample budget exceeded: {} samples required, limit {} ({} s, {} Hz, {} channels).", required, limit, seconds, rate, channels);
+    }
 }

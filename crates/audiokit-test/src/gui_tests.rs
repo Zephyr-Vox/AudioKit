@@ -70,6 +70,8 @@ fn workbench_forms_worker_exports_and_software_layout() {
         for profile in 0..2 {
             let mut c = forms::defaults(scenario, profile).unwrap();
             c.max_trace_events = 17;
+            c.max_input_bytes = 1_048_576;
+            c.max_pcm_samples = 262_144;
             c.receive.render.source_limiter.release_ms = 173.0;
             state.borrow_mut().apply(&ui, c.clone(), false).unwrap();
             let projected = forms::get(&ui, &state.borrow().config).unwrap();
@@ -111,9 +113,42 @@ fn workbench_forms_worker_exports_and_software_layout() {
     writer.finalize().unwrap();
     ui.set_input_path(input.to_string_lossy().as_ref().into());
     ui.set_output_base(root.to_string_lossy().as_ref().into());
+    let mut controls = ui.get_controls();
+    controls.pcm_samples = "1000".into();
+    ui.set_controls(controls);
+    ui.invoke_validate();
+    wait(&ui, &state);
+    assert!(ui.get_failed());
+    assert!(ui.get_budget_failure().active);
+    assert_eq!(ui.get_budget_failure().required, "1001");
+    assert_eq!(ui.get_budget_failure().limit, "1000");
+    ui.set_language(0);
+    ui.invoke_language_changed();
+    assert!(
+        ui.global::<ui::Strings>()
+            .invoke_sample_budget(
+                "1001".into(),
+                "1000".into(),
+                "0.0".into(),
+                "48000".into(),
+                "1".into()
+            )
+            .starts_with("WAV 样本数量超限")
+    );
+    ui.set_panel_index(4);
+    screenshot(&ui, &root.join("budget-error-zh.png"), 720, 700);
+    ui.set_language(1);
+    ui.invoke_language_changed();
+    screenshot(&ui, &root.join("budget-error-en.png"), 720, 700);
+    controls = ui.get_controls();
+    controls.pcm_samples = RunConfig::default().max_pcm_samples.to_string().into();
+    controls.input_bytes = RunConfig::default().max_input_bytes.to_string().into();
+    ui.set_controls(controls);
+    ui.set_panel_index(0);
     ui.invoke_validate();
     wait(&ui, &state);
     assert!(!ui.get_failed(), "{}", ui.get_status());
+    assert!(!ui.get_budget_failure().active);
     assert!(ui.get_coverage().starts_with("Validated"));
     ui.invoke_execute();
     assert!(ui.get_busy());
@@ -190,7 +225,8 @@ fn workbench_forms_worker_exports_and_software_layout() {
     for (panel, name) in [
         (2, "render.png"),
         (3, "protection.png"),
-        (4, "advanced.png"),
+        (4, "resources.png"),
+        (5, "advanced.png"),
     ] {
         ui.set_panel_index(panel);
         screenshot(&ui, &root.join(name), 720, 700);

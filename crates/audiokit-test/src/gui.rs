@@ -26,6 +26,7 @@ mod preview;
 use ui::{StageRow, Workbench};
 
 fn status(ui: &Workbench, text: slint::SharedString) {
+    ui.set_budget_failure(ui::BudgetFailure::default());
     ui.set_status_prefix("".into());
     ui.set_status_detail("".into());
     ui.set_status(text);
@@ -157,6 +158,26 @@ fn fresh(base: &Path, prefix: &str) -> PathBuf {
 fn show_error(ui: &Workbench, error: &Error) {
     ui.set_failed(true);
     detail_status(ui, "Operation failed", error.to_string());
+    if let Error::DecodedSampleBudget {
+        required,
+        limit,
+        sample_rate_hz,
+        channels,
+    } = error
+    {
+        ui.set_budget_failure(ui::BudgetFailure {
+            active: true,
+            required: required.to_string().into(),
+            limit: limit.to_string().into(),
+            seconds: format!(
+                "{:.3}",
+                *required as f64 / (f64::from(*sample_rate_hz) * f64::from(*channels))
+            )
+            .into(),
+            rate: sample_rate_hz.to_string().into(),
+            channels: channels.to_string().into(),
+        });
+    }
 }
 fn show_plan(ui: &Workbench, plan: &ExecutionPlan, state: &str) {
     ui.set_coverage(format!("{state} / {}", plan.coverage).into());

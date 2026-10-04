@@ -57,6 +57,8 @@ pub(super) fn put(ui: &Workbench, config: &RunConfig) -> Result<()> {
         attack: m.attack_ms.to_string().into(),
         release: m.release_ms.to_string().into(),
         headroom: m.reconstruction_headroom_db.to_string().into(),
+        input_bytes: config.max_input_bytes.to_string().into(),
+        pcm_samples: config.max_pcm_samples.to_string().into(),
     });
     ui.set_preset_json(serde_json::to_string_pretty(config)?.into());
     Ok(())
@@ -77,6 +79,8 @@ fn quality(index: i32) -> Result<ResamplerQuality> {
 pub(super) fn get(ui: &Workbench, base: &RunConfig) -> Result<RunConfig> {
     let c = ui.get_controls();
     let mut config = base.clone();
+    config.max_input_bytes = number(&c.input_bytes, "max_input_bytes")?;
+    config.max_pcm_samples = number(&c.pcm_samples, "max_pcm_samples")?;
     if Some(&config.scenario) != SCENARIOS.get(ui.get_scenario() as usize)
         || config.stream
             != if ui.get_profile() == 0 {

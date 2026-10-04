@@ -12,8 +12,11 @@ use std::{
 pub(crate) const JSON_LIMIT: u64 = 32 * 1024 * 1024;
 pub(crate) fn bytes(path: &Path, max: u64) -> Result<Vec<u8>> {
     let file = File::open(path)?;
-    if file.metadata()?.len() > max {
-        return Err(Error::Invalid("file exceeds byte budget".into()));
+    let size = file.metadata()?.len();
+    if size > max {
+        return Err(Error::Invalid(format!(
+            "file exceeds byte budget: requires {size} bytes, limit {max}"
+        )));
     }
     let mut data = Vec::new();
     file.take(max + 1).read_to_end(&mut data)?;
@@ -54,7 +57,12 @@ pub(crate) fn wav(data: &[u8], max_samples: usize) -> Result<(AudioFormat, Vec<f
     };
     let format = AudioFormat::new(spec.sample_rate, layout)?;
     if reader.len() as usize > max_samples {
-        return Err(Error::Invalid("decoded sample budget exceeded".into()));
+        return Err(Error::DecodedSampleBudget {
+            required: u64::from(reader.len()),
+            limit: max_samples,
+            sample_rate_hz: spec.sample_rate,
+            channels: spec.channels,
+        });
     }
     let mut pcm = Vec::with_capacity(reader.len() as usize);
     match (spec.sample_format, spec.bits_per_sample) {
@@ -103,4 +111,39 @@ pub(crate) fn write_wav(path: &Path, format: AudioFormat, pcm: &[f32]) -> Result
     }
     writer.finalize()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decoded_budget_counts_interleaved_samples_and_preserves_boundary() {
+        let mut bytes = Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(
+            &mut bytes,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 48_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        for sample in [100_i16, -100, 200, -200, 300, -300] {
+            writer.write_sample(sample).unwrap();
+        }
+        writer.finalize().unwrap();
+        let error = wav(bytes.get_ref(), 5).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(matches!(
+            error,
+            Error::DecodedSampleBudget {
+                required: 6,
+                limit: 5,
+                sample_rate_hz: 48_000,
+                channels: 2
+            }
+        ));
+        assert_eq!(wav(bytes.get_ref(), 6).unwrap().1.len(), 6);
+    }
 }

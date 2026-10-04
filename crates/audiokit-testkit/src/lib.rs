@@ -51,6 +51,20 @@ pub enum Error {
     /// Invalid configuration, resource budget, schema or input.
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// WAV header exceeds the configured interleaved sample cap, before PCM allocation.
+    #[error(
+        "invalid input: decoded sample budget exceeded: WAV requires {required} interleaved samples, limit {limit} ({sample_rate_hz} Hz, {channels} channels); increase max_pcm_samples or use shorter input"
+    )]
+    DecodedSampleBudget {
+        /// Total scalar samples across all channels, not per-channel frames.
+        required: u64,
+        /// Configured maximum decoded input or output samples.
+        limit: usize,
+        /// Actual WAV sample rate in Hz.
+        sample_rate_hz: u32,
+        /// Actual WAV channel count.
+        channels: u16,
+    },
     /// An optional compiled backend is missing.
     #[error("capability unavailable: {0}")]
     Capability(String),
@@ -85,7 +99,7 @@ impl Error {
     /// Stable process code: invalid 2, unavailable 3, runtime 4, cancelled 130.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Invalid(_) | Self::Json(_) | Self::Wav(_) => 2,
+            Self::Invalid(_) | Self::DecodedSampleBudget { .. } | Self::Json(_) | Self::Wav(_) => 2,
             Self::Capability(_) | Self::Audio(audiokit::AudioError::Unsupported(_)) => 3,
             Self::Audio(
                 audiokit::AudioError::InvalidConfig(_) | audiokit::AudioError::InvalidFrame(_),

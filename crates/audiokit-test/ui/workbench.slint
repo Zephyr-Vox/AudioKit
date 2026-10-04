@@ -8,7 +8,9 @@ export struct Controls {
     output-rate: string, jitter: string, sources: string, silent: string, source-gain: string,
     admission: string, fade: string, source-ceiling: string, master-ceiling: string,
     lookahead: string, attack: string, release: string, headroom: string,
+    input-bytes: string, pcm-samples: string,
 }
+export struct BudgetFailure { active: bool, required: string, limit: string, seconds: string, rate: string, channels: string }
 export struct StageRow { name: string, state: string, applied: bool }
 component Field inherits HorizontalLayout {
     in property <string> label;
@@ -52,6 +54,7 @@ export component Workbench inherits Window {
     in property <string> status: @tr("Ready");
     in property <string> status-prefix;
     in property <string> status-detail;
+    in property <BudgetFailure> budget-failure;
     in property <string> coverage: @tr("Offline");
     in property <string> peak: "--";
     in property <string> clamps: "--";
@@ -200,6 +203,15 @@ export component Workbench inherits Window {
                         }
                     }
                     Tab {
+                        title: @tr("Resources");
+                        VerticalLayout {
+                            padding: 16px; spacing: 12px;
+                            Field { label: @tr("Input byte budget"); value <=> root.controls.input-bytes; active: !root.busy; }
+                            Field { label: @tr("PCM sample budget"); value <=> root.controls.pcm-samples; active: !root.busy; }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                    Tab {
                         title: @tr("Advanced JSON");
                         VerticalLayout {
                             padding: 12px; spacing: 8px;
@@ -278,6 +290,6 @@ export component Workbench inherits Window {
             Button { text: @tr("Cancel"); enabled: root.busy; clicked => { root.cancel(); } }
             ProgressIndicator { progress: root.progress; horizontal-stretch: 1; }
         }
-        Text { text: root.status-prefix == "" ? Strings.translate(root.status) : Strings.translate(root.status-prefix) + ": " + Strings.translate(root.status-detail); color: root.failed ? #b63342 : #287269; wrap: word-wrap; }
+        Text { text: root.budget-failure.active ? Strings.sample-budget(root.budget-failure.required, root.budget-failure.limit, root.budget-failure.seconds, root.budget-failure.rate, root.budget-failure.channels) : root.status-prefix == "" ? Strings.translate(root.status) : Strings.translate(root.status-prefix) + ": " + Strings.translate(root.status-detail); color: root.failed ? #b63342 : #287269; wrap: word-wrap; }
     }
 }

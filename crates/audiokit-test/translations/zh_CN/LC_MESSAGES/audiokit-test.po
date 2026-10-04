@@ -414,3 +414,15 @@ msgstr "已取消"
 
 msgid "Failed"
 msgstr "失败"
+
+msgid "Resources"
+msgstr "资源上限"
+
+msgid "Input byte budget"
+msgstr "输入字节上限"
+
+msgid "PCM sample budget"
+msgstr "PCM 样本数量上限"
+
+msgid "WAV sample budget exceeded: {} samples required, limit {} ({} s, {} Hz, {} channels)."
+msgstr "WAV 样本数量超限：需要 {} 个样本，当前上限 {}（时长 {} 秒，{} Hz，{} 声道）。"

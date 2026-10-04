@@ -354,3 +354,40 @@ fn no_arguments_provides_help_without_opening_any_surface() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("replay --bundle"));
 }
+
+#[test]
+fn wav_sample_budget_is_actionable_and_configurable_without_partial_artifacts() {
+    let fixture = Fixture::new();
+    let input = fixture.input();
+    let config = fixture.config();
+    let output = fixture.path("budget-run");
+    fs::write(
+        &config,
+        br#"{"processing":{"enabled":false},"max_pcm_samples":1000}"#,
+    )
+    .unwrap();
+    let args = [
+        "run",
+        "--input",
+        input.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--out-dir",
+        output.to_str().unwrap(),
+        "--quiet",
+    ];
+    let failed = execute(&args);
+    assert_eq!(failed.status.code(), Some(2));
+    let message = value(&failed)["error"].as_str().unwrap().to_owned();
+    assert!(message.contains("requires 1001 interleaved samples, limit 1000"));
+    assert!(message.contains("max_pcm_samples"));
+    assert!(!output.exists());
+    fs::write(
+        &config,
+        br#"{"processing":{"enabled":false},"max_pcm_samples":1100}"#,
+    )
+    .unwrap();
+    let accepted = execute(&args);
+    assert!(accepted.status.success());
+    assert_eq!(value(&accepted)["output_frames"], 1001);
+}
